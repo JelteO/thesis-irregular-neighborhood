@@ -4,91 +4,150 @@ import os
 import torch
 import torch_geometric
 from torch_geometric.data import HeteroData
-
-print(torch.__version__)
-print(torch_geometric.__version__)
-
-root_dir = os.getcwd()
-
-df = pd.read_csv(f"{root_dir}/data/processed/fraud_dataset_processed.csv")
-# df = df.sort_values("entry_id").reset_index(drop=True)
+from torch_geometric.utils import subgraph
+from torch_geometric.data import Data
 
 
-# index mapping, categorical to node ids. For PROFIT_CENTER & GL_ACCOUNT nodes
-# GNN only works with integer node indices
-# PyTorch Geometric expected format is edge_index = [[source_nodes], [target_nodes]]
+def create_graphs():
+    root_dir = os.getcwd()
+    df = pd.read_csv(f"{root_dir}/data/processed/fraud_dataset_processed.csv")
 
-gl_account_unique = df["gl_account"].unique()
-gl_account_mapping = {account: idx for idx, account in enumerate(gl_account_unique)}
-df["gl_account_idx"] = df["gl_account"].map(gl_account_mapping)
-print(df[["entry_id", "gl_account", "gl_account_idx"]].head(5))
+    # categorical data for one-hot features on entry node
+    # data is known during transaction, no prior knowledge leakage in model
+    ENTRY_CATEGORICAL = ["posting_key", "account_key", "company_code", "currency"]
 
-profit_center_unique = df["profit_center"].unique()
-profit_center_mapping = {center: idx for idx, center in enumerate(profit_center_unique)}
-df["profit_center_idx"] = df["profit_center"].map(profit_center_mapping)
-print(df[["entry_id", "profit_center", "profit_center_idx"]].head(5))
+    # index mapping, categorical to node ids. For PROFIT_CENTER & GL_ACCOUNT nodes
+    # GNN only works with integer node indices
+    # PyTorch Geometric expected format is edge_index = [[source_nodes], [target_nodes]]
+    gl_unique = df["gl_account"].unique()
+    pc_unique = df["profit_center"].unique()
 
-# feature engineering (node features)
-feature_cols = [
-    "feature_log_amount_local",
-    "feature_log_amount_doc",
-    "feature_iszero_amount_doc",
-    "feature_ratio_amount_local_doc",
-    "feature_israre_postingkey",
-    "feature_israre_accountkey",
-    "feature_israre_currency",
-]
+    gl_account_mapping = {account: idx for idx, account in enumerate(gl_unique)}
+    df["gl_idx"] = df["gl_account"].map(gl_account_mapping)
 
-entry_features = torch.tensor(df[feature_cols].values, dtype=torch.float)
-print(entry_features.shape)
+    pc_mapping = {center: idx for idx, center in enumerate(pc_unique)}
+    df["pc_idx"] = df["profit_center"].map(pc_mapping)
 
-# create degree feature for profit_center and gl_account
-gl_degree = df["gl_account_idx"].value_counts().sort_index()
-pc_degree = df["profit_center_idx"].value_counts().sort_index()
+    numb_gl = len(gl_unique)
+    numb_pc = len(pc_unique)
 
-gl_feature = torch.tensor(gl_degree.to_numpy().reshape(-1, 1), dtype=torch.float)
-pc_feature = torch.tensor(pc_degree.to_numpy().reshape(-1, 1), dtype=torch.float)
+    # numerical features, log normalised amounts (from preprocessing.py)
+    NUMERICAL_COLUMNS = ["feature_amount_local", "feature_amount_doc"]
+    num_features = torch.tensor(df[NUMERICAL_COLUMNS].values, dtype=torch.float)
 
-# edge construction (foreign keys to edges)
-entry_idx = torch.arange(len(df))
-gl_idx = torch.tensor(df["gl_account_idx"].values)
-pc_idx = torch.tensor(df["profit_center_idx"].values)
+    # categorical features as one-hot encoding
+    ohe_df = pd.get_dummies(
+        df[ENTRY_CATEGORICAL], columns=ENTRY_CATEGORICAL, dtype=np.float32
+    )
+    cat_features = torch.tensor(ohe_df.values, dtype=torch.float)
 
-label_mapping = {"regular": 0, "local": 1, "global": 2}
-label = torch.tensor(df["label"].map(label_mapping).values)
+    # concat to a single entry feature vector
+    entry_features = torch.cat([num_features, cat_features], dim=1)
 
-# https://pytorch.org/blog/how-computational-graphs-are-executed-in-pytorch/
-# https://medium.com/we-talk-data/pytorch-geometric-tutorial-94af3ae2b8cb
-# https://docs.pytorch.org/docs/stable/generated/torch.stack.html
-# https://pytorch-geometric.readthedocs.io/en/2.5.3/_modules/torch_geometric/data/data.html?
-# HeteroData https://pytorch-geometric.readthedocs.io/en/2.6.0/notes/heterogeneous.html?
-data = HeteroData()
-data["entry"].x = entry_features
-data["entry"].y = label
-data["profit_center"].x = pc_feature
-data["gl_account"].x = gl_feature
+    # metadata: keep track of which column present what feature
+    # gnn_model.py requires this metadata for slicinig for cross-entropy loss at reconstruction
+    cat_dims = {col: df[col].nunique() for col in ENTRY_CATEGORICAL}
+    entry_feature_info = {
+        "num_numerical": len(NUMERICAL_COLUMNS),
+        "categorical_dims": cat_dims,
+        "categorical_order": ENTRY_CATEGORICAL,
+    }
 
-# edge 1
-data["entry", "posts_to", "gl_account"].edge_index = torch.stack([entry_idx, gl_idx])
-data["gl_account", "posted_by", "entry"].edge_index = torch.stack([gl_idx, entry_idx])
+    gl_x = torch.arange(numb_gl, dtype=torch.long).unsqueeze(1)  # shape [73, 1]
+    pc_x = torch.arange(numb_pc, dtype=torch.long).unsqueeze(1)  # shape [157, 1]
 
-# edge 2
-data["entry", "assigned_to", "profit_center"].edge_index = torch.stack([entry_idx, pc_idx])
-data["profit_center", "contains", "entry"].edge_index = torch.stack([pc_idx, entry_idx])
+    entry_idx = torch.arange(len(df))
+    gl_idx = torch.tensor(df["gl_idx"].values)
+    pc_idx = torch.tensor(df["pc_idx"].values)
 
-# print(data)
-data.validate(raise_on_error=True)
+    label_mapping = {"regular": 0, "local": 1, "global": 2}
+    label = torch.tensor(df["label"].map(label_mapping).values)
 
-torch.save(data, f"{root_dir}/data/processed/graph_hetero.pt")
+    # https://pytorch.org/blog/how-computational-graphs-are-executed-in-pytorch/
+    # https://medium.com/we-talk-data/pytorch-geometric-tutorial-94af3ae2b8cb
+    # https://docs.pytorch.org/docs/stable/generated/torch.stack.html
+    # https://pytorch-geometric.readthedocs.io/en/2.5.3/_modules/torch_geometric/data/data.html
+    # HeteroData https://pytorch-geometric.readthedocs.io/en/2.6.0/notes/heterogeneous.html
 
-homo_convert = data.to_homogeneous()
+    data = HeteroData()
+    data["entry"].x = entry_features
+    data["profit_center"].x = pc_x
+    data["gl_account"].x = gl_x
 
+    data.entry_feature_info = entry_feature_info
+    data.num_gl_accounts = numb_gl
+    data.num_profit_centers = numb_pc
 
+    data["entry"].y = label
+    data["gl_account"].y = torch.zeros(gl_x.shape[0], dtype=torch.long)  # regular
+    data["profit_center"].y = torch.zeros(pc_x.shape[0], dtype=torch.long)  # regular
 
-num_entries = len(df)
-if homo_convert.num_nodes is None:
-    raise ValueError
-homo_convert.entry_mask = torch.zeros(homo_convert.num_nodes, dtype=torch.bool)
-homo_convert.entry_mask[:num_entries] = True
-homo_convert.validate(raise_on_error=True)
-torch.save(homo_convert, f"{root_dir}/data/processed/graph_homo.pt")
+    # edge 1
+    data["entry", "posts_to", "gl_account"].edge_index = torch.stack(
+        [entry_idx, gl_idx]
+    )
+    data["gl_account", "posted_by", "entry"].edge_index = torch.stack(
+        [gl_idx, entry_idx]
+    )
+
+    # edge 2
+    data["entry", "assigned_to", "profit_center"].edge_index = torch.stack(
+        [entry_idx, pc_idx]
+    )
+    data["profit_center", "contains", "entry"].edge_index = torch.stack(
+        [pc_idx, entry_idx]
+    )
+
+    print(data)
+    data.validate(raise_on_error=True)
+
+    # sanity check before save
+    expected_dim = 2 + sum(cat_dims.values())
+    assert (
+        entry_features.shape[1] == expected_dim
+    ), f"feature dim mismatch: {entry_features.shape[1]} vs expected {expected_dim}"
+    print(f"check passed\n entry feat:{expected_dim}dims")
+    torch.save(data, f"{root_dir}/data/processed/graph_hetero.pt")
+
+    # data_homo = data.to_homogeneous()
+    # data_homo.entry_mask = torch.zeros(data_homo.num_nodes, dtype=torch.bool)
+    # data_homo.entry_mask[: (len(df))] = True
+    # data_homo.validate(raise_on_error=True)
+    # torch.save(data_homo, f"{root_dir}/data/processed/graph_homo.pt")
+    # print(f"homo: {data_homo.num_nodes} nodes, {data_homo.edge_index.shape[1]} edges")
+
+    # # subset homo graph
+    # anomaly_idx = (label != 0).nonzero(as_tuple=True)[0]
+    # regular_idx = (label == 0).nonzero(as_tuple=True)[0]
+    # perm = torch.randperm(len(regular_idx), generator=torch.Generator().manual_seed(42))
+    # keep_entries = torch.cat([anomaly_idx, regular_idx[perm[:10_000]]])
+
+    # n_e = len(keep_entries)  # 10.100
+    # gl_offset = n_e  # 10.100
+    # pc_offset = n_e + numb_gl  # 10.173
+
+    # new_idx = torch.arange(n_e)
+    # gl_src = gl_idx[keep_entries]
+    # pc_src = pc_idx[keep_entries]
+
+    # edge_index = torch.stack(
+    #     [
+    #         torch.cat([new_idx, gl_src + gl_offset, new_idx, pc_src + pc_offset]),
+    #         torch.cat([gl_src + gl_offset, new_idx, pc_src + pc_offset, new_idx]),
+    #     ]
+    # )
+
+    # gl_x_pad = torch.cat([gl_x, torch.zeros(numb_gl, 1)], dim=1)  # (73,  2)
+    # pc_x_pad = torch.cat([pc_x, torch.zeros(numb_pc, 1)], dim=1)  # (157, 2)
+    # x = torch.cat([entry_features[keep_entries], gl_x_pad, pc_x_pad])
+    # y = torch.cat(
+    #     [label[keep_entries], torch.zeros(numb_gl + numb_pc, dtype=torch.long)]
+    # )
+
+    # homo_sample = Data(x=x, edge_index=edge_index, y=y)
+    # homo_sample.n_entries = n_e
+    # homo_sample.validate(raise_on_error=True)
+    # torch.save(homo_sample, f"{root_dir}/data/processed/graph_homo_sample.pt")
+    # print(f"homo_sample: {homo_sample.num_nodes} nodes, {edge_index.shape[1]} edges")
+
+    return True

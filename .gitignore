@@ -224,3 +224,12 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 src/data/preprocessing_dump.py
+
+*.csv
+.DS_Store
+
+# Pytorch models
+*.pt
+
+# untrack, reference model by schreyer
+KDD_2019_Lab_compatible.ipynb
