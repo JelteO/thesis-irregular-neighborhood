@@ -8,31 +8,37 @@ from torch_geometric.utils import subgraph
 from torch_geometric.data import Data
 
 
-def create_graphs():
+def create_graphs_phil():
     root_dir = os.getcwd()
-    df = pd.read_csv(f"{root_dir}/data/processed/fraud_dataset_processed.csv")
+    df = pd.read_csv(f"{root_dir}/data/processed/city_payments_processed.csv")
 
     # categorical data for one-hot features on entry node
     # data is known during transaction, no prior knowledge leakage in model
-    ENTRY_CATEGORICAL = ["posting_key", "account_key", "company_code", "currency"]
+    ENTRY_CATEGORICAL = [
+        "month",
+        "day",
+        "character_title",
+        "sub_obj_title",
+        "doc_ref_no_prefix_definition",
+    ]
 
     # index mapping, categorical to node ids. For PROFIT_CENTER & GL_ACCOUNT nodes
     # GNN only works with integer node indices
     # PyTorch Geometric expected format is edge_index = [[source_nodes], [target_nodes]]
-    gl_unique = df["gl_account"].unique()
-    pc_unique = df["profit_center"].unique()
+    gl_unique = df["vendor_name"].unique()
+    pc_unique = df["department_title"].unique()
 
     gl_account_mapping = {account: idx for idx, account in enumerate(gl_unique)}
-    df["gl_idx"] = df["gl_account"].map(gl_account_mapping)
+    df["gl_idx"] = df["vendor_name"].map(gl_account_mapping)
 
     pc_mapping = {center: idx for idx, center in enumerate(pc_unique)}
-    df["pc_idx"] = df["profit_center"].map(pc_mapping)
+    df["pc_idx"] = df["department_title"].map(pc_mapping)
 
     numb_gl = len(gl_unique)
     numb_pc = len(pc_unique)
 
     # numerical features, log normalised amounts (from preprocessing.py)
-    NUMERICAL_COLUMNS = ["feature_amount_local", "feature_amount_doc"]
+    NUMERICAL_COLUMNS = ["amount_log"]
     num_features = torch.tensor(df[NUMERICAL_COLUMNS].values, dtype=torch.float)
 
     # categorical features as one-hot encoding
@@ -60,8 +66,7 @@ def create_graphs():
     gl_idx = torch.tensor(df["gl_idx"].values)
     pc_idx = torch.tensor(df["pc_idx"].values)
 
-    label_mapping = {"regular": 0, "local": 1, "global": 2}
-    label = torch.tensor(df["label"].map(label_mapping).values)
+    label = torch.zeros(len(df), dtype=torch.long)
 
     # https://pytorch.org/blog/how-computational-graphs-are-executed-in-pytorch/
     # https://medium.com/we-talk-data/pytorch-geometric-tutorial-94af3ae2b8cb
@@ -102,52 +107,11 @@ def create_graphs():
 
     # sanity check before save
     expected_dim = len(NUMERICAL_COLUMNS) + sum(cat_dims.values())
+
     assert (
         entry_features.shape[1] == expected_dim
     ), f"feature dim mismatch: {entry_features.shape[1]} vs expected {expected_dim}"
     print(f"check passed\n entry feat:{expected_dim}dims")
-    torch.save(data, f"{root_dir}/data/processed/graph_hetero.pt")
-
-    # data_homo = data.to_homogeneous()
-    # data_homo.entry_mask = torch.zeros(data_homo.num_nodes, dtype=torch.bool)
-    # data_homo.entry_mask[: (len(df))] = True
-    # data_homo.validate(raise_on_error=True)
-    # torch.save(data_homo, f"{root_dir}/data/processed/graph_homo.pt")
-    # print(f"homo: {data_homo.num_nodes} nodes, {data_homo.edge_index.shape[1]} edges")
-
-    # # subset homo graph
-    # anomaly_idx = (label != 0).nonzero(as_tuple=True)[0]
-    # regular_idx = (label == 0).nonzero(as_tuple=True)[0]
-    # perm = torch.randperm(len(regular_idx), generator=torch.Generator().manual_seed(42))
-    # keep_entries = torch.cat([anomaly_idx, regular_idx[perm[:10_000]]])
-
-    # n_e = len(keep_entries)  # 10.100
-    # gl_offset = n_e  # 10.100
-    # pc_offset = n_e + numb_gl  # 10.173
-
-    # new_idx = torch.arange(n_e)
-    # gl_src = gl_idx[keep_entries]
-    # pc_src = pc_idx[keep_entries]
-
-    # edge_index = torch.stack(
-    #     [
-    #         torch.cat([new_idx, gl_src + gl_offset, new_idx, pc_src + pc_offset]),
-    #         torch.cat([gl_src + gl_offset, new_idx, pc_src + pc_offset, new_idx]),
-    #     ]
-    # )
-
-    # gl_x_pad = torch.cat([gl_x, torch.zeros(numb_gl, 1)], dim=1)  # (73,  2)
-    # pc_x_pad = torch.cat([pc_x, torch.zeros(numb_pc, 1)], dim=1)  # (157, 2)
-    # x = torch.cat([entry_features[keep_entries], gl_x_pad, pc_x_pad])
-    # y = torch.cat(
-    #     [label[keep_entries], torch.zeros(numb_gl + numb_pc, dtype=torch.long)]
-    # )
-
-    # homo_sample = Data(x=x, edge_index=edge_index, y=y)
-    # homo_sample.n_entries = n_e
-    # homo_sample.validate(raise_on_error=True)
-    # torch.save(homo_sample, f"{root_dir}/data/processed/graph_homo_sample.pt")
-    # print(f"homo_sample: {homo_sample.num_nodes} nodes, {edge_index.shape[1]} edges")
+    torch.save(data, f"{root_dir}/data/processed/graph_hetero_phil.pt")
 
     return True
-
