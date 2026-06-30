@@ -2,12 +2,14 @@ import pandas as pd
 import numpy as np
 import os
 from sklearn.preprocessing import LabelEncoder, StandardScaler
+from pathlib import Path
 
+ROOT_DIR = Path(os.getcwd())
+OUTPUT_DIR = ROOT_DIR / "outputs"
 
 def preprocessing():
-    root_dir = os.getcwd()
 
-    df = pd.read_csv(f"{root_dir}/data/raw/fraud_dataset_v2.csv")
+    df = pd.read_csv(f"{ROOT_DIR}/data/raw/fraud_dataset_v2.csv")
 
     # <class 'pandas.DataFrame'>
     # RangeIndex: 533009 entries, 0 to 533008
@@ -43,7 +45,7 @@ def preprocessing():
 
     #### SPECIFIC FOR GRAPH ONLY ###########
     df = df.sort_values("entry_id").reset_index(drop=True)
-    os.makedirs(f"{root_dir}/data/processed", exist_ok=True)
+    os.makedirs(f"{ROOT_DIR}/data/processed", exist_ok=True)
 
     df_graph = df.copy()
 
@@ -66,7 +68,7 @@ def preprocessing():
     df_graph["feature_amount_doc"] = (amount_doc_log - doc_min) / (doc_max - doc_min)
 
     df_graph.to_csv(
-        f"{root_dir}/data/processed/fraud_dataset_processed.csv", index=False
+        f"{ROOT_DIR}/data/processed/fraud_dataset_processed.csv", index=False
     )
     ########################################
 

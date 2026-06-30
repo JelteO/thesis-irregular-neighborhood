@@ -1,13 +1,14 @@
 import pandas as pd
 import numpy as np
 import os
-from sklearn.preprocessing import LabelEncoder, StandardScaler
+from pathlib import Path
 
+ROOT_DIR = Path(os.getcwd())
+OUTPUT_DIR = ROOT_DIR / "outputs"
 
 def preprocessing_phil():
-    root_dir = os.getcwd()
 
-    df = pd.read_csv(f"{root_dir}/data/raw/city_payments_fy2017.csv")
+    df = pd.read_csv(f"{ROOT_DIR}/data/raw/city_payments_fy2017.csv")
     df["check_date"] = pd.to_datetime(df["check_date"])
     df = df.sort_values("check_date").reset_index(drop=True)
 
@@ -66,11 +67,8 @@ def preprocessing_phil():
         ]
     )
 
-    os.makedirs(f"{root_dir}/data/processed", exist_ok=True)
-    df.to_csv(f"{root_dir}/data/processed/city_payments_processed.csv", index=False)
-
-    print(f"processed shape: {df.shape}")
-    print(f"column: {list(df.columns)}")
+    os.makedirs(f"{ROOT_DIR}/data/processed", exist_ok=True)
+    df.to_csv(f"{ROOT_DIR}/data/processed/city_payments_processed.csv", index=False)
     return df
 
 

@@ -8,7 +8,11 @@ from torchmetrics.functional.retrieval import retrieval_precision, retrieval_rec
 from src.data.preprocessing import preprocessing
 from pygod.detector import DOMINANT
 from src.data.graph_construction import create_graphs
+import os
+from pathlib import Path
 
+ROOT_DIR = Path(os.getcwd())
+OUTPUT_DIR = ROOT_DIR / "outputs"
 
 def load_data():
     df_train, df_eval, df_train_unscaled, df_eval_unscaled = preprocessing()
@@ -22,29 +26,21 @@ def split_data(df_train, df_eval):
     x_eval = df_eval[feature_cols].to_numpy()
 
     y_eval = (df_eval["label"] != "regular").astype(int).to_numpy()
-
-    print(x_train.shape)
     return x_train, x_eval, y_eval
 
 
 def scoring_metric(y_eval, scores):
     if hasattr(scores, "numpy"):
         scores = scores.numpy()
-    print(f"shape y_eval: {y_eval.shape}; shape scores: {scores.shape}")
 
     roc_auc = roc_auc_score(y_true=y_eval, y_score=scores)
     avg_prec = average_precision_score(y_true=y_eval, y_score=scores)
-
-    print(f"roc_auc_score: {roc_auc}")
-    print(f"avg_precision_score: {avg_prec}")
 
     target = torch.tensor(y_eval, dtype=torch.bool)
     predict = torch.tensor(scores.astype(np.float32), dtype=torch.float32)
 
     p_at_100 = retrieval_precision(preds=predict, target=target, top_k=100).item()
     r_at_100 = retrieval_recall(preds=predict, target=target, top_k=100).item()
-    print(f"P@100: {p_at_100:.4f}")
-    print(f"R@100: {r_at_100:.4f}")
 
     return {
         "roc_auc": roc_auc,
@@ -129,7 +125,9 @@ def experiment_schreyer(epochs=10, device="cpu"):
 
     df_ranked = df_scores.sort_values("score", ascending=False).reset_index(drop=True)
     df_ranked["rank"] = np.arange(1, len(df_ranked) + 1)
-    print(df_ranked[df_ranked["label"] != "regular"].head(20))
+    df_ranked.to_csv(
+        f"{OUTPUT_DIR}/anomaly_ranking_schreyerae_baseline.csv", index=False
+    )
 
     return df_scores, metrics
 

@@ -1,8 +1,7 @@
-from torch_geometric.nn import SAGEConv, to_hetero, Sequential, HeteroConv
+from torch_geometric.nn import SAGEConv, HeteroConv
 import torch
-import os, sys
-import torch_geometric.transforms as T
-from torch.nn import Embedding, Linear, MSELoss, ReLU, CrossEntropyLoss, ModuleDict
+import os
+from torch.nn import Embedding, Linear, MSELoss, CrossEntropyLoss, ModuleDict
 import torch.nn.functional as F
 from tqdm import tqdm
 from torch_geometric.loader import NeighborLoader
@@ -14,45 +13,24 @@ from sklearn.manifold import TSNE
 from src.data.graph_construction import create_graphs
 from src.data.graph_construction_phil import create_graphs_phil
 import matplotlib.pyplot as plt
-import networkx as nx
 import numpy as np
+import random
 
 # https://github.com/pyg-team/pytorch_geometric/blob/master/examples/hetero/bipartite_sage_unsup.py#L173
 # https://www.kaggle.com/code/rayanaay/graph-neural-network-graphsage-sample-agregate
-# https://pytorch-geometric.readthedocs.io/en/latest/tutorial/explain.html
 
 pd.options.display.max_columns = 9
 
 device = torch.device("cpu")
-root_dir = os.getcwd()
+from pathlib import Path
 
-DATASET = "schreyer"  # "schreyer"  # or "philadelphia"
-
-if DATASET == "schreyer":
-    create_graphs()
-    graph = torch.load(f"{root_dir}/data/processed/graph_hetero.pt", weights_only=False)
-    HAS_LABELS = True
-else:
-    create_graphs_phil()
-    graph = torch.load(
-        f"{root_dir}/data/processed/graph_hetero_phil.pt", weights_only=False
-    )
-    HAS_LABELS = False
+ROOT_DIR = Path(os.getcwd())
+OUTPUT_DIR = ROOT_DIR / "outputs"
 
 EMBEDDING_DIM = 16
 HIDDEN_DIM = 64
-OUTPUT_DIM = graph["entry"].x.shape[1]
-NUM_GL = graph.num_gl_accounts
-NUM_PC = graph.num_profit_centers
-NUM_NUMERICAL = graph.entry_feature_info["num_numerical"]
-CAT_DIMS = graph.entry_feature_info["categorical_dims"]
-CAT_ORDER = graph.entry_feature_info["categorical_order"]
 GAMMA = 0.65
 ALPHA = 1.0
-
-regular_idx = (graph["entry"].y == 0).nonzero(as_tuple=True)[0]
-local_idx = (graph["entry"].y == 1).nonzero(as_tuple=True)[0]  # indices
-global_idx = (graph["entry"].y == 2).nonzero(as_tuple=True)[0]  # indices
 
 
 def plot_score_distribution(scores, save_path, title="Score distribution"):
@@ -308,14 +286,12 @@ def build_audit_table(model, graph, df_best_test, gamma, top_n=20):
         )
         subgraph = next(iter(single_loader))
 
-        # OCCLUSION
-        # "how much does each neighbour matter?
+        # occlusion: how much does each neighbour matter?
         occlusion_results = occlusion_explain(model, subgraph, gamma)
         vendor_drop = occlusion_results[0]["drop_percentage"]
         department_drop = occlusion_results[1]["drop_percentage"]
 
-        # FEATURE
-        # "which attribute was hardest to reconstruct?
+        # feature breakdown: which attribute was hardest to reconstruct?
         feature_breakdown = feature_error_breakdown(model, subgraph, gamma)
         top_feature = max(feature_breakdown.items(), key=lambda item: item[1])
 
@@ -324,11 +300,6 @@ def build_audit_table(model, graph, df_best_test, gamma, top_n=20):
                 "rank": int(row["rank"]),
                 "entry_id": entry_id,
                 "score": round(float(row["score"]), 4),
-                "re_component": round(float(row["re_norm"]), 4),
-                "sd_component": round(float(row["sd_norm"]), 4),
-                "dominant_signal": (
-                    "reconstruction" if row["re_norm"] >= row["sd_norm"] else "distance"
-                ),
                 "vendor_drop_pct": round(vendor_drop, 1),
                 "department_drop_pct": round(department_drop, 1),
                 "top_feature": top_feature[0],
@@ -337,49 +308,6 @@ def build_audit_table(model, graph, df_best_test, gamma, top_n=20):
         )
 
     return pd.DataFrame(audit_rows)
-
-
-gen = torch.Generator().manual_seed(42)
-
-if HAS_LABELS:
-    regular_train, regular_val, regular_test = split(regular_idx, gen)
-    _, local_val, local_test = split(local_idx, gen)
-    _, global_val, global_test = split(global_idx, gen)
-
-    print(f"val anomaly split: {len(local_val)}(local)/{len(global_val)}(global)")
-    print(f"test anomaly split: {len(local_test)}(local)/{len(global_test)}(global)")
-
-    train_mask = regular_train
-    val_mask = torch.cat([regular_val, local_val, global_val])
-    test_mask = torch.cat([regular_test, local_test, global_test])
-
-    val_mask = val_mask[torch.randperm(len(val_mask), generator=gen)]
-    test_mask = test_mask[torch.randperm(len(test_mask), generator=gen)]
-else:
-    all_idx = torch.arange(graph["entry"].num_nodes)
-    all_idx = all_idx[torch.randperm(len(all_idx), generator=gen)]
-    n = len(all_idx)
-
-    train_mask = all_idx[: int(0.8 * n)]
-    val_mask = all_idx[int(0.8 * n) : int(0.9 * n)]
-    test_mask = all_idx[int(0.9 * n) :]
-
-LOADER_KWARGS = dict(
-    data=graph,
-    num_neighbors=[10] * 2,
-    batch_size=128,
-    subgraph_type="bidirectional",
-)
-
-neighbor_train = NeighborLoader(
-    input_nodes=("entry", train_mask), shuffle=True, **LOADER_KWARGS
-)
-neighbor_val = NeighborLoader(
-    input_nodes=("entry", val_mask), shuffle=False, **LOADER_KWARGS
-)
-neighbor_test = NeighborLoader(
-    input_nodes=("entry", test_mask), shuffle=False, **LOADER_KWARGS
-)
 
 
 def get_prec_recall(predict, target, top_k: int):
@@ -464,14 +392,6 @@ class Model(torch.nn.Module):
         return z_dict["entry"][:batch_size]
 
 
-model = Model(
-    embedding_dim=EMBEDDING_DIM,
-    hidden_dim=HIDDEN_DIM,
-    num_pc=NUM_PC,
-    num_gl=NUM_GL,
-    num_numerical=NUM_NUMERICAL,
-    cat_dims=CAT_DIMS,
-)
 mse_mean = MSELoss(reduction="mean")
 ce_mean = CrossEntropyLoss(reduction="mean")
 
@@ -626,126 +546,10 @@ def evaluate(loader, centroid, epoch=None, split_str=None, alpha=None, gamma=Non
     return metrics, df_epoch, z_all.numpy(), all_targets
 
 
-EPOCHS = 1
-optimizer = Adam(model.parameters(), lr=0.0001)
-df_performance = pd.DataFrame()
-
-BEST_VAL_AUC = 0
-BEST_EPOCH = 0
-PATIENCE = 5
-EPOCH_NO_IMPROVE = 0
-all_rows = []
-
-for epoch in range(1, EPOCHS + 1):
-    print(f"Epoch: {epoch:02d}")
-    loss, mse, ce = train()
-    centroid = calc_regular_centroid(neighbor_train)
-    val_metrics, df_val, _, _ = evaluate(
-        neighbor_val, centroid, epoch, "val", alpha=ALPHA, gamma=GAMMA
-    )
-    all_rows.append(df_val)
-
-    if HAS_LABELS:
-        print(
-            f"Epoch {epoch:02d} | Loss {loss:.4f} (MSE {mse:.4f}, CE {ce:.4f}) | "
-            f"Val ROC {val_metrics['roc_auc']:.4f} | P@100 {val_metrics['p100']:.4f}"
-        )
-        if val_metrics["roc_auc"] > BEST_VAL_AUC:
-            BEST_VAL_AUC = val_metrics["roc_auc"]
-            BEST_EPOCH = epoch
-            EPOCH_NO_IMPROVE = 0
-            torch.save(
-                model.state_dict(), f"{root_dir}/data/processed/best_model_{DATASET}.pt"
-            )
-        else:
-            EPOCH_NO_IMPROVE += 1
-        if EPOCH_NO_IMPROVE >= PATIENCE:
-            print(f"early stopped at epoch: {epoch}")
-            break
-    else:
-        print(f"Epoch {epoch:02d} | Loss {loss:.4f} (MSE {mse:.4f}, CE {ce:.4f})")
-        BEST_EPOCH = epoch
-        torch.save(
-            model.state_dict(), f"{root_dir}/data/processed/best_model_{DATASET}.pt"
-        )
-
-
-model.load_state_dict(
-    torch.load(f"{root_dir}/data/processed/best_model_{DATASET}.pt", weights_only=True)
-)
-centroid = calc_regular_centroid(neighbor_train)
-
-if HAS_LABELS:
-    alpha_iter = []
-    for a in [0.0, 0.25, 0.5, 0.65, 0.75, 0.9, 1.0]:
-        test_metrics_a, df_test_a, z_test_a, y_test_a = evaluate(
-            neighbor_test, centroid, BEST_EPOCH, "test", alpha=a, gamma=GAMMA
-        )
-        alpha_iter.append({"alpha": a, **test_metrics_a})
-    df_alpha = pd.DataFrame(alpha_iter)
-    df_alpha.to_csv(f"{root_dir}/ablation_alpha_{DATASET}.csv", index=False)
-
-
-test_metrics, df_test, z_test, y_test = evaluate(
-    neighbor_test, centroid, BEST_EPOCH, "test", alpha=ALPHA, gamma=GAMMA
-)
-all_rows.append(df_test)
-
-if HAS_LABELS:
-    print(
-        f"\n best epoch {BEST_EPOCH}; test ROCAUC {test_metrics['roc_auc']:.4f} "
-        f"; P@100 {test_metrics['p100']:.4f}; R@100 {test_metrics['r100']:.4f}"
-    )
-else:
-    print(f"\n {DATASET}: test set scored, {len(df_test)} entries")
-
-df_performance = pd.concat(all_rows, ignore_index=True)
-
-df_best_test = (
-    df_performance[df_performance["split"] == "test"]
-    .sort_values("score", ascending=False)
-    .reset_index(drop=True)
-    .copy()
-)
-df_best_test["rank"] = df_best_test.index + 1
-
-df_best_test.to_csv(f"{root_dir}/anomaly_ranking_BEST_EPOCH_{DATASET}.csv", index=False)
-
-if HAS_LABELS:
-    label_map = {0: "regular", 1: "local", 2: "global"}
-    top100 = df_best_test.head(100).copy()
-    top100["label_name"] = top100["label"].map(label_map)
-    print(f"best epoch: {BEST_EPOCH} | test ROC-AUC: {test_metrics['roc_auc']:.4f}\n")
-    print("top100 labels:")
-    print(top100["label_name"].value_counts())
-    print("\nanomalies top100:")
-    print(top100[top100["label"] != 0][["entry_id", "label_name", "score", "rank"]])
-else:
-    print(f"\ntop-10 highest scoring journal entries ({DATASET}):")
-    print(df_best_test.head(10)[["entry_id", "score", "re_norm", "rank"]])
-
-if HAS_LABELS:
-    plot_latent_space(
-        z_test,
-        y_test,
-        save_path=f"{root_dir}/latent_space_test_{DATASET}.png",
-        title="GNN latent space - Schreyer (t-SNE)",
-    )
-else:
-    plot_latent_space(
-        z_test,
-        y_test,
-        save_path=f"{root_dir}/latent_space_test_{DATASET}.png",
-        scores=df_test["score"].to_numpy(),
-        title="GNN latent space - Philadelphia (t-SNE)",
-    )
-
-
 def gamma_ablation(gamma_sweep, epochs=10):
-    global model, optimizer
+    global model, optimizer, GAMMA
     gamma_iter = []
     for g in gamma_sweep:
-        global GAMMA
         GAMMA = g
         model = Model(
             embedding_dim=EMBEDDING_DIM,
@@ -763,89 +567,305 @@ def gamma_ablation(gamma_sweep, epochs=10):
         test_metrics, _, _, _ = evaluate(
             loader=neighbor_test,
             centroid=centroid,
-            epoch=epoch,
+            epoch=epochs,
             split_str="val",
             alpha=1.0,
             gamma=g,
         )
         gamma_iter.append({"gamma": g, **test_metrics})
     df_gamma = pd.DataFrame(gamma_iter)
-    df_gamma.to_csv(f"{root_dir}/ablation_gamma_{DATASET}.csv", index=False)
+    df_gamma.to_csv(f"{OUTPUT_DIR}/ablation_gamma_{DATASET}.csv", index=False)
     return df_gamma
 
 
-# if HAS_LABELS:
-#     df_gamma = gamma_ablation(
-#         gamma_sweep=[0.0, 0.25, 0.5, 0.65, 0.75, 0.9, 1.0], epochs=10
-#     )
+def run_gnn(dataset, has_labels, seed=42, epochs=20):
+    global DATASET, HAS_LABELS, graph
+    global NUM_GL, NUM_PC, NUM_NUMERICAL, CAT_DIMS, CAT_ORDER, OUTPUT_DIM
+    global regular_idx, local_idx, global_idx
+    global model, optimizer
+    global neighbor_train, neighbor_val, neighbor_test
+    global EPOCHS
 
-sep_scores = df_best_test["score"].to_numpy()
-sep_series = pd.Series(sep_scores)
+    DATASET = dataset
+    HAS_LABELS = has_labels
+    EPOCHS = epochs
 
-score_max = float(sep_series.max())
-score_p99 = float(sep_series.quantile(0.99))
-score_median = float(sep_series.quantile(0.50))
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)
 
-separation = {
-    "max": score_max,
-    "p99": score_p99,
-    "median": score_median,
-    "max_over_median": score_max / (score_median + 1e-12),
-    "p99_over_median": score_p99 / (score_median + 1e-12),
-}
+    if DATASET == "schreyer":
+        graph = torch.load(
+            f"{ROOT_DIR}/data/processed/graph_hetero.pt", weights_only=False
+        )
+    else:
+        graph = torch.load(
+            f"{ROOT_DIR}/data/processed/graph_hetero_phil.pt", weights_only=False
+        )
 
-print("\nscore separation:")
-for key, value in separation.items():
-    print(f"{key}:{value:.4f}")
+    OUTPUT_DIM = graph["entry"].x.shape[1]
+    NUM_GL = graph.num_gl_accounts
+    NUM_PC = graph.num_profit_centers
+    NUM_NUMERICAL = graph.entry_feature_info["num_numerical"]
+    CAT_DIMS = graph.entry_feature_info["categorical_dims"]
+    CAT_ORDER = graph.entry_feature_info["categorical_order"]
 
-pd.DataFrame([separation]).to_csv(
-    f"{root_dir}/score_separation_{DATASET}.csv", index=False
-)
+    regular_idx = (graph["entry"].y == 0).nonzero(as_tuple=True)[0]
+    local_idx = (graph["entry"].y == 1).nonzero(as_tuple=True)[0]
+    global_idx = (graph["entry"].y == 2).nonzero(as_tuple=True)[0]
 
+    gen = torch.Generator().manual_seed(seed)
 
-if not HAS_LABELS:
-    raw = pd.read_csv(f"{root_dir}/data/processed/city_payments_processed.csv")
-    top_ids = df_best_test.head(20)["entry_id"].astype(int).tolist()
+    if HAS_LABELS:
+        regular_train, regular_val, regular_test = split(regular_idx, gen)
+        _, local_val, local_test = split(local_idx, gen)
+        _, global_val, global_test = split(global_idx, gen)
 
-    # entry_id is de rij-index in de gesorteerde processed CSV
-    top_raw = raw.iloc[top_ids].copy()
-    top_raw["score"] = df_best_test.head(20)["score"].values
-    top_raw["rank"] = range(1, len(top_raw) + 1)
-    top_raw.to_csv(f"{root_dir}/top20_inspection_{DATASET}.csv", index=False)
+        print(f"val anomaly split: {len(local_val)}(local)/{len(global_val)}(global)")
+        print(
+            f"test anomaly split: {len(local_test)}(local)/{len(global_test)}(global)"
+        )
 
-    print(
-        top_raw[
-            ["rank", "score", "amount_log", "vendor_name", "department_title"]
-        ].to_string(index=False)
+        train_mask = regular_train
+        val_mask = torch.cat([regular_val, local_val, global_val])
+        test_mask = torch.cat([regular_test, local_test, global_test])
+
+        val_mask = val_mask[torch.randperm(len(val_mask), generator=gen)]
+        test_mask = test_mask[torch.randperm(len(test_mask), generator=gen)]
+    else:
+        all_idx = torch.arange(graph["entry"].num_nodes)
+        all_idx = all_idx[torch.randperm(len(all_idx), generator=gen)]
+        n = len(all_idx)
+
+        train_mask = all_idx[: int(0.8 * n)]
+        val_mask = all_idx[int(0.8 * n) : int(0.9 * n)]
+        test_mask = all_idx[int(0.9 * n) :]
+
+    loader_kwargs = dict(
+        data=graph,
+        num_neighbors=[10] * 2,
+        batch_size=128,
+        subgraph_type="bidirectional",
     )
 
+    neighbor_train = NeighborLoader(
+        input_nodes=("entry", train_mask), shuffle=True, **loader_kwargs
+    )
+    neighbor_val = NeighborLoader(
+        input_nodes=("entry", val_mask), shuffle=False, **loader_kwargs
+    )
+    neighbor_test = NeighborLoader(
+        input_nodes=("entry", test_mask), shuffle=False, **loader_kwargs
+    )
 
-audit_table = build_audit_table(model, graph, df_best_test, GAMMA, top_n=20)
+    model = Model(
+        embedding_dim=EMBEDDING_DIM,
+        hidden_dim=HIDDEN_DIM,
+        num_pc=NUM_PC,
+        num_gl=NUM_GL,
+        num_numerical=NUM_NUMERICAL,
+        cat_dims=CAT_DIMS,
+    )
+    optimizer = Adam(model.parameters(), lr=0.0001)
+
+    best_val_auc = 0
+    best_epoch = 0
+    patience = 3
+    epoch_no_improve = 0
+    all_rows = []
+
+    for epoch in range(1, EPOCHS + 1):
+        print(f"Epoch: {epoch:02d}")
+        loss, mse, ce = train()
+        centroid = calc_regular_centroid(neighbor_train)
+        val_metrics, df_val, _, _ = evaluate(
+            neighbor_val, centroid, epoch, "val", alpha=ALPHA, gamma=GAMMA
+        )
+        all_rows.append(df_val)
+
+        if HAS_LABELS:
+            print(
+                f"Epoch {epoch:02d} | Loss {loss:.4f} (MSE {mse:.4f}, CE {ce:.4f}) | "
+                f"Val ROC {val_metrics['roc_auc']:.4f} | P@100 {val_metrics['p100']:.4f}"
+            )
+            if val_metrics["roc_auc"] > best_val_auc:
+                best_val_auc = val_metrics["roc_auc"]
+                best_epoch = epoch
+                epoch_no_improve = 0
+                torch.save(
+                    model.state_dict(),
+                    f"{ROOT_DIR}/data/processed/best_model_{DATASET}.pt",
+                )
+            else:
+                epoch_no_improve += 1
+            if epoch_no_improve >= patience:
+                print(f"early stopped at epoch: {epoch}")
+                break
+        else:
+            print(f"Epoch {epoch:02d} | Loss {loss:.4f} (MSE {mse:.4f}, CE {ce:.4f})")
+            best_epoch = epoch
+            torch.save(
+                model.state_dict(), f"{ROOT_DIR}/data/processed/best_model_{DATASET}.pt"
+            )
+
+    model.load_state_dict(
+        torch.load(
+            f"{ROOT_DIR}/data/processed/best_model_{DATASET}.pt", weights_only=True
+        )
+    )
+    centroid = calc_regular_centroid(neighbor_train)
+
+    if HAS_LABELS:
+        alpha_iter = []
+        for a in [0.0, 0.25, 0.5, 0.65, 0.75, 0.9, 1.0]:
+            test_metrics_a, df_test_a, z_test_a, y_test_a = evaluate(
+                neighbor_test, centroid, best_epoch, "test", alpha=a, gamma=GAMMA
+            )
+            alpha_iter.append({"alpha": a, **test_metrics_a})
+        df_alpha = pd.DataFrame(alpha_iter)
+        df_alpha.to_csv(f"{OUTPUT_DIR}/ablation_alpha_{DATASET}.csv", index=False)
+
+    test_metrics, df_test, z_test, y_test = evaluate(
+        neighbor_test, centroid, best_epoch, "test", alpha=ALPHA, gamma=GAMMA
+    )
+    all_rows.append(df_test)
+
+    if HAS_LABELS:
+        print(
+            f"\n best epoch {best_epoch}; test ROCAUC {test_metrics['roc_auc']:.4f} "
+            f"; P@100 {test_metrics['p100']:.4f}; R@100 {test_metrics['r100']:.4f}"
+        )
+    else:
+        print(f"\n {DATASET}: test set scored, {len(df_test)} entries")
+
+    df_performance = pd.concat(all_rows, ignore_index=True)
+
+    df_best_test = (
+        df_performance[df_performance["split"] == "test"]
+        .sort_values("score", ascending=False)
+        .reset_index(drop=True)
+        .copy()
+    )
+    df_best_test["rank"] = df_best_test.index + 1
+
+    df_best_test.to_csv(
+        f"{OUTPUT_DIR}/anomaly_ranking_BEST_EPOCH_{DATASET}.csv", index=False
+    )
+
+    if HAS_LABELS:
+        label_map = {0: "regular", 1: "local", 2: "global"}
+        top100 = df_best_test.head(100).copy()
+        top100["label_name"] = top100["label"].map(label_map)
+        print("top100 labels:")
+        print(top100["label_name"].value_counts())
+        print("\nanomalies top100:")
+        print(top100[top100["label"] != 0][["entry_id", "label_name", "score", "rank"]])
+    else:
+        print(f"\ntop-10 highest scoring journal entries ({DATASET}):")
+        print(df_best_test.head(10)[["entry_id", "score", "re_norm", "rank"]])
+
+    if HAS_LABELS:
+        plot_latent_space(
+            z_test,
+            y_test,
+            save_path=f"{OUTPUT_DIR}/latent_space_test_{DATASET}.png",
+            title="GNN latent space - Schreyer (t-SNE)",
+        )
+    else:
+        plot_latent_space(
+            z_test,
+            y_test,
+            save_path=f"{OUTPUT_DIR}/latent_space_test_{DATASET}.png",
+            scores=df_test["score"].to_numpy(),
+            title="GNN latent space - Philadelphia (t-SNE)",
+        )
+
+    # gamma ablation is slow on CPU, run separately when needed
+    if HAS_LABELS:
+        gamma_ablation(gamma_sweep=[0.0, 0.25, 0.5, 0.65, 0.75, 0.9, 1.0], epochs=10)
+
+    sep_scores = df_best_test["score"].to_numpy()
+    sep_series = pd.Series(sep_scores)
+
+    score_max = float(sep_series.max())
+    score_p99 = float(sep_series.quantile(0.99))
+    score_median = float(sep_series.quantile(0.50))
+
+    separation = {
+        "max": score_max,
+        "p99": score_p99,
+        "median": score_median,
+        "max_over_median": score_max / (score_median + 1e-12),
+        "p99_over_median": score_p99 / (score_median + 1e-12),
+    }
+
+    print("\nscore separation:")
+    for key, value in separation.items():
+        print(f"{key}:{value:.4f}")
+
+    pd.DataFrame([separation]).to_csv(
+        f"{OUTPUT_DIR}/score_separation_{DATASET}.csv", index=False
+    )
+
+    if not HAS_LABELS:
+        raw = pd.read_csv(f"{ROOT_DIR}/data/processed/city_payments_processed.csv")
+        top_ids = df_best_test.head(20)["entry_id"].astype(int).tolist()
+
+        # entry_id is the row index in the sorted processed CSV
+        top_raw = raw.iloc[top_ids].copy()
+        top_raw["score"] = df_best_test.head(20)["score"].values
+        top_raw["rank"] = range(1, len(top_raw) + 1)
+        top_raw.to_csv(f"{OUTPUT_DIR}/top20_inspection_{DATASET}.csv", index=False)
+
+    audit_table = build_audit_table(model, graph, df_best_test, GAMMA, top_n=20)
+
+    if not HAS_LABELS:
+        raw = pd.read_csv(f"{ROOT_DIR}/data/processed/city_payments_processed.csv")
+        audit_table["vendor_name"] = raw.iloc[audit_table["entry_id"]][
+            "vendor_name"
+        ].values
+        audit_table["department"] = raw.iloc[audit_table["entry_id"]][
+            "department_title"
+        ].values
+        audit_table["sub_obj_title"] = raw.iloc[audit_table["entry_id"]][
+            "sub_obj_title"
+        ].values
+
+    audit_table.to_csv(f"{OUTPUT_DIR}/audit_table_{DATASET}.csv", index=False)
+    print(f"\naudit table saved: audit_table_{DATASET}.csv")
+
+    plot_score_distribution(
+        scores=df_best_test["score"].to_numpy(),
+        save_path=f"{OUTPUT_DIR}/score_distribution_{DATASET}.png",
+        title=f"Anomaly score distribution - {DATASET}",
+    )
+
+    scores_without_top = df_best_test["score"].to_numpy()[1:]
+
+    plot_score_distribution(
+        scores=scores_without_top,
+        save_path=f"{OUTPUT_DIR}/score_distribution_{DATASET}_no_top1.png",
+        title=f"Anomaly score distribution (excl. top 1 entry) - {DATASET}",
+    )
+    
+    df_gnn_common = None
+    if HAS_LABELS:
+        y_entry = graph["entry"].y
+        anom = (y_entry != 0).nonzero(as_tuple=True)[0]
+        reg = (y_entry == 0).nonzero(as_tuple=True)[0]
+        perm = torch.randperm(len(reg), generator=torch.Generator().manual_seed(seed))
+        common_ids = torch.cat([anom, reg[perm[:10_000]]])
+
+        common_loader = NeighborLoader(
+            input_nodes=("entry", common_ids), shuffle=False, **loader_kwargs
+        )
+        _, df_gnn_common, _, _ = evaluate(
+            common_loader, centroid, best_epoch, "common", alpha=ALPHA, gamma=GAMMA
+        )
+        df_gnn_common.to_csv(f"{OUTPUT_DIR}/gnn_common_10100_{DATASET}.csv", index=False)
+
+    return df_best_test, test_metrics, df_gnn_common
 
 
-if not HAS_LABELS:
-    raw = pd.read_csv(f"{root_dir}/data/processed/city_payments_processed.csv")
-    audit_table["vendor_name"] = raw.iloc[audit_table["entry_id"]]["vendor_name"].values
-    audit_table["department"] = raw.iloc[audit_table["entry_id"]][
-        "department_title"
-    ].values
-    audit_table["sub_obj_title"] = raw.iloc[audit_table["entry_id"]][
-        "sub_obj_title"
-    ].values
-
-audit_table.to_csv(f"{root_dir}/audit_table_{DATASET}.csv", index=False)
-print(f"\naudit table saved: audit_table_{DATASET}.csv")
-
-plot_score_distribution(
-    scores=df_best_test["score"].to_numpy(),
-    save_path=f"{root_dir}/score_distribution_{DATASET}.png",
-    title=f"Anomaly score distribution - {DATASET}",
-)
-
-scores_without_top = df_best_test["score"].to_numpy()[1:]
-
-plot_score_distribution(
-    scores=scores_without_top,
-    save_path=f"{root_dir}/score_distribution_{DATASET}_no_top1.png",
-    title=f"Anomaly score distribution (excl. top 1 entry) - {DATASET}",
-)
+if __name__ == "__main__":
+    run_gnn(dataset="schreyer", has_labels=True, seed=42, epochs=20)

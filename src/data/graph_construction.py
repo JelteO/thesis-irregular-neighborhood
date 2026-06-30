@@ -6,11 +6,13 @@ import torch_geometric
 from torch_geometric.data import HeteroData
 from torch_geometric.utils import subgraph
 from torch_geometric.data import Data
+from pathlib import Path
 
+ROOT_DIR = Path(os.getcwd())
+OUTPUT_DIR = ROOT_DIR / "outputs"
 
 def create_graphs():
-    root_dir = os.getcwd()
-    df = pd.read_csv(f"{root_dir}/data/processed/fraud_dataset_processed.csv")
+    df = pd.read_csv(f"{ROOT_DIR}/data/processed/fraud_dataset_processed.csv")
 
     # categorical data for one-hot features on entry node
     # data is known during transaction, no prior knowledge leakage in model
@@ -106,48 +108,53 @@ def create_graphs():
         entry_features.shape[1] == expected_dim
     ), f"feature dim mismatch: {entry_features.shape[1]} vs expected {expected_dim}"
     print(f"check passed\n entry feat:{expected_dim}dims")
-    torch.save(data, f"{root_dir}/data/processed/graph_hetero.pt")
+    torch.save(data, f"{ROOT_DIR}/data/processed/graph_hetero.pt")
 
-    # data_homo = data.to_homogeneous()
-    # data_homo.entry_mask = torch.zeros(data_homo.num_nodes, dtype=torch.bool)
-    # data_homo.entry_mask[: (len(df))] = True
-    # data_homo.validate(raise_on_error=True)
-    # torch.save(data_homo, f"{root_dir}/data/processed/graph_homo.pt")
-    # print(f"homo: {data_homo.num_nodes} nodes, {data_homo.edge_index.shape[1]} edges")
+    data_homo = data.to_homogeneous()
+    num_nodes = data_homo.num_nodes
+    assert num_nodes is not None and data_homo.edge_index is not None
+    
+    data_homo.entry_mask = torch.zeros(num_nodes, dtype=torch.bool)
+    data_homo.entry_mask[: (len(df))] = True
+    data_homo.validate(raise_on_error=True)
+    torch.save(data_homo, f"{ROOT_DIR}/data/processed/graph_homo.pt")
+    print(f"homo: {data_homo.num_nodes} nodes, {data_homo.edge_index.shape[1]} edges")
 
-    # # subset homo graph
-    # anomaly_idx = (label != 0).nonzero(as_tuple=True)[0]
-    # regular_idx = (label == 0).nonzero(as_tuple=True)[0]
-    # perm = torch.randperm(len(regular_idx), generator=torch.Generator().manual_seed(42))
-    # keep_entries = torch.cat([anomaly_idx, regular_idx[perm[:10_000]]])
+    # subset homo graph
+    anomaly_idx = (label != 0).nonzero(as_tuple=True)[0]
+    regular_idx = (label == 0).nonzero(as_tuple=True)[0]
+    perm = torch.randperm(len(regular_idx), generator=torch.Generator().manual_seed(42))
+    keep_entries = torch.cat([anomaly_idx, regular_idx[perm[:10_000]]])
 
-    # n_e = len(keep_entries)  # 10.100
-    # gl_offset = n_e  # 10.100
-    # pc_offset = n_e + numb_gl  # 10.173
+    n_e = len(keep_entries)  # 10.100
+    gl_offset = n_e  # 10.100
+    pc_offset = n_e + numb_gl  # 10.173
 
-    # new_idx = torch.arange(n_e)
-    # gl_src = gl_idx[keep_entries]
-    # pc_src = pc_idx[keep_entries]
+    new_idx = torch.arange(n_e)
+    gl_src = gl_idx[keep_entries]
+    pc_src = pc_idx[keep_entries]
 
-    # edge_index = torch.stack(
-    #     [
-    #         torch.cat([new_idx, gl_src + gl_offset, new_idx, pc_src + pc_offset]),
-    #         torch.cat([gl_src + gl_offset, new_idx, pc_src + pc_offset, new_idx]),
-    #     ]
-    # )
+    edge_index = torch.stack(
+        [
+            torch.cat([new_idx, gl_src + gl_offset, new_idx, pc_src + pc_offset]),
+            torch.cat([gl_src + gl_offset, new_idx, pc_src + pc_offset, new_idx]),
+        ]
+    )
+    
+    feat_dim = entry_features.shape[1]# 388
+    gl_x_pad = torch.zeros(numb_gl, feat_dim)
+    pc_x_pad = torch.zeros(numb_pc, feat_dim)
+    x = torch.cat([entry_features[keep_entries], gl_x_pad, pc_x_pad], dim=0)
 
-    # gl_x_pad = torch.cat([gl_x, torch.zeros(numb_gl, 1)], dim=1)  # (73,  2)
-    # pc_x_pad = torch.cat([pc_x, torch.zeros(numb_pc, 1)], dim=1)  # (157, 2)
-    # x = torch.cat([entry_features[keep_entries], gl_x_pad, pc_x_pad])
-    # y = torch.cat(
-    #     [label[keep_entries], torch.zeros(numb_gl + numb_pc, dtype=torch.long)]
-    # )
+    y = torch.cat(
+        [label[keep_entries], torch.zeros(numb_gl + numb_pc, dtype=torch.long)]
+    )
 
-    # homo_sample = Data(x=x, edge_index=edge_index, y=y)
-    # homo_sample.n_entries = n_e
-    # homo_sample.validate(raise_on_error=True)
-    # torch.save(homo_sample, f"{root_dir}/data/processed/graph_homo_sample.pt")
-    # print(f"homo_sample: {homo_sample.num_nodes} nodes, {edge_index.shape[1]} edges")
+    homo_sample = Data(x=x, edge_index=edge_index, y=y)
+    homo_sample.n_entries = n_e
+    homo_sample.validate(raise_on_error=True)
+    torch.save(homo_sample, f"{ROOT_DIR}/data/processed/graph_homo_sample.pt")
+    print(f"homo_sample: {homo_sample.num_nodes} nodes, {edge_index.shape[1]} edges")
 
     return True
 

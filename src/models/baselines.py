@@ -1,18 +1,12 @@
-from sklearn.decomposition import IncrementalPCA
-from scipy import sparse
 from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import IsolationForest
 import numpy as np
 from typing import Literal
-
-from pygod.detector import DOMINANT
 
 
 class PCABaseline:
     def __init__(self, n_components=0.95, random_state=42):
         self.n_components = n_components
-        self.scaler = StandardScaler()
         self.pca = PCA(n_components=n_components, random_state=random_state)
 
     def fit(self, x_train):
@@ -36,7 +30,6 @@ class IsolationForestBaseline:
     ):
         self.max_samples = max_samples
         self.random_state = random_state
-        self.scaler = StandardScaler()
         self.clf = IsolationForest(
             max_samples=max_samples,
             random_state=random_state,

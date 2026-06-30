@@ -6,11 +6,13 @@ import torch_geometric
 from torch_geometric.data import HeteroData
 from torch_geometric.utils import subgraph
 from torch_geometric.data import Data
+from pathlib import Path
 
+ROOT_DIR = Path(os.getcwd())
+OUTPUT_DIR = ROOT_DIR / "outputs"
 
 def create_graphs_phil():
-    root_dir = os.getcwd()
-    df = pd.read_csv(f"{root_dir}/data/processed/city_payments_processed.csv")
+    df = pd.read_csv(f"{ROOT_DIR}/data/processed/city_payments_processed.csv")
 
     # categorical data for one-hot features on entry node
     # data is known during transaction, no prior knowledge leakage in model
@@ -112,6 +114,6 @@ def create_graphs_phil():
         entry_features.shape[1] == expected_dim
     ), f"feature dim mismatch: {entry_features.shape[1]} vs expected {expected_dim}"
     print(f"check passed\n entry feat:{expected_dim}dims")
-    torch.save(data, f"{root_dir}/data/processed/graph_hetero_phil.pt")
+    torch.save(data, f"{ROOT_DIR}/data/processed/graph_hetero_phil.pt")
 
     return True
