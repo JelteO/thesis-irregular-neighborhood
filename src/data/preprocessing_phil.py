@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT_DIR = Path(os.getcwd())
 OUTPUT_DIR = ROOT_DIR / "outputs"
 
+
 def preprocessing_phil():
 
     df = pd.read_csv(f"{ROOT_DIR}/data/raw/city_payments_fy2017.csv")
@@ -34,7 +35,6 @@ def preprocessing_phil():
     15  transaction_amount            238894 non-null  float64
     dtypes: float64(1), int64(4), str(11)
     memory usage: 29.2 MB
-    print(df.info())
     """
 
     df["month"] = df["check_date"].dt.month
@@ -51,6 +51,12 @@ def preprocessing_phil():
         "unknown"
     )
 
+    # drop reason:
+    # dept/char_/sub_obj/doc_ref_no_prefix duplicate their *_title columns,
+    # contract_* is 52% missing,
+    # document_no is a unique id,
+    # fy is constant,
+    # fm/check_date/transaction_amount are replaced by month/day/amount_log
     df = df.drop(
         columns=[
             "fy",
@@ -71,10 +77,6 @@ def preprocessing_phil():
     df.to_csv(f"{ROOT_DIR}/data/processed/city_payments_processed.csv", index=False)
     return df
 
-
-if __name__ == "__main__":
-    preprocessing_phil()
-    print("preprocessing done")
 
 """ links I have used:
 https://scikit-learn.org/1.5/modules/decomposition.html#incrementalpca

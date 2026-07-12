@@ -1,7 +1,7 @@
 # main.py
 # Runs the whole pipeline: preprocessing, graph building, GNN
-# training and explainability for both datasets, and finally the baselines.
-# Just run `python main.py` and everything happens in order.
+# training and explainability for both datasets, and finally the baselines
+# Just run `python main.py` and everything happens in order
 
 import os
 import torch
@@ -17,10 +17,11 @@ from src.evaluation.experiment import (
     experiment_dominant,
 )
 from src.models.seed import set_seed
-from src.evaluation.comparison import common_entry_ids, compare_on_common
 import pandas as pd
-
 from pathlib import Path
+from src.evaluation.comparison import compare_on_common
+from src.data.split import make_entry_split, sample_common_test
+from src.evaluation.fidelity import fidelity
 
 ROOT_DIR = Path.cwd()
 OUTPUT_DIR = ROOT_DIR / "outputs"
@@ -29,7 +30,7 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 SEED = 42
-EPOCHS = 20
+EPOCHS = 10
 
 
 def run_schreyer():
@@ -68,7 +69,6 @@ def run_philadelphia():
 
 def run_baselines():
     # Run 4 baselines. These only apply ot the labelled dataset
-
     scores_by_model = {}
 
     for name, experiment in [
@@ -77,7 +77,7 @@ def run_baselines():
         ("schreyer AE", experiment_schreyer),
         ("DOMINANT", experiment_dominant),
     ]:
-        # one broken baseline shouldn't stop the others, wrap each one
+        # one failed baseline shouldn't stop the others
         try:
             print(f"\nrunning baseline: {name}")
             set_seed(seed=SEED)
@@ -90,16 +90,21 @@ def run_baselines():
 
 
 if __name__ == "__main__":
+    # return value used for baseline comparison on labelled dataset
     _, _, df_gnn_common = run_schreyer()
+
     run_philadelphia()
     dfs = run_baselines()
     dfs["GNN (hetero)"] = df_gnn_common
 
     labels = pd.read_csv("data/processed/fraud_dataset_processed.csv")["label"]
-    common_ids = common_entry_ids((labels != "regular").astype(int))
+    label_int = torch.tensor(labels.map({"regular": 0, "local": 1, "global": 2}).values)
+    _, _, test_ids = make_entry_split(label_int, seed=SEED)
+    common_ids = sample_common_test(label_int, test_ids, n_regular=10_000, seed=SEED)
     table = compare_on_common(dfs, common_ids)
 
-    print("\nComparison Table of common 10.100 entries")
+    print("\nComparison Table of common 10.050 entries")
     print(table.to_string())
-    table.to_csv(f"{OUTPUT_DIR}/comparison_common_10100.csv")
+    table.to_csv(f"{OUTPUT_DIR}/comparison_common_10050.csv")
+    fidelity()
     print("\nMain.py done")

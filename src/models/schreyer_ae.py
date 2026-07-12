@@ -232,7 +232,13 @@ class SchreyerAEBaseline:
         idx = np.random.choice(all_samples.shape[0], size=n, replace=False)
         return all_samples[idx]
 
-    def fit(self, x_train: np.ndarray, epochs: int = 100, lr: float = 0.001):
+    def fit(
+        self,
+        x_train: np.ndarray,
+        epochs: int = 100,
+        lr: float = 1e-3,
+        lr_disc: float = 1e-5,
+    ):
         reconstruction_criterion_categorical = nn.BCELoss(reduction="mean").to(
             self.device
         )
@@ -242,8 +248,8 @@ class SchreyerAEBaseline:
         # define optimizers
         encoder_optimizer = Adam(self.encoder.parameters(), lr=lr)
         decoder_optimizer = Adam(self.decoder.parameters(), lr=lr)
-        discriminator_optimizer = Adam(self.discriminator.parameters(), lr=lr)
-        generator_optimizer = Adam(self.encoder.parameters(), lr=lr)
+        discriminator_optimizer = Adam(self.discriminator.parameters(), lr=lr_disc)
+        generator_optimizer = Adam(self.encoder.parameters(), lr=lr_disc)
 
         # convert pre-processed data to pytorch tensor
         torch_dataset = TensorDataset(

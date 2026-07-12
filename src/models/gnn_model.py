@@ -1,3 +1,8 @@
+# gnn_model.py - hetero GNN autoencoder, training, scoring, audit
+# in: graph_hetero.pt (533239 nodes) and the split from split.py
+# out: anomaly ranking csv, ablation csvs, audit table, plots
+# ---------------------------------------------------------------
+
 from torch_geometric.nn import SAGEConv, HeteroConv
 import torch
 import os
@@ -6,18 +11,14 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from torch_geometric.loader import NeighborLoader
 from torch.optim.adam import Adam
-from sklearn.metrics import roc_auc_score
-from torchmetrics.functional.retrieval import retrieval_precision, retrieval_recall
 import pandas as pd
 from sklearn.manifold import TSNE
-from src.data.graph_construction import create_graphs
-from src.data.graph_construction_phil import create_graphs_phil
 import matplotlib.pyplot as plt
 import numpy as np
 import random
-
-# https://github.com/pyg-team/pytorch_geometric/blob/master/examples/hetero/bipartite_sage_unsup.py#L173
-# https://www.kaggle.com/code/rayanaay/graph-neural-network-graphsage-sample-agregate
+from torch_geometric.data import HeteroData
+from src.data.split import make_entry_split, sample_common_test
+from src.evaluation.comparison import metrics_from_scores
 
 pd.options.display.max_columns = 9
 
@@ -124,18 +125,6 @@ def plot_latent_space(latent_vectors, labels, save_path, scores=None, title="plo
     print(f"latent space plot saved: {save_path}")
 
 
-def split(index, generator, frac_train=0.8, frac_val=0.1):
-    index = index[torch.randperm(len(index), generator=generator)]
-    n = len(index)
-    n_train = int(frac_train * n)
-    n_val = int(frac_val * n)
-
-    train_idx = index[:n_train]
-    val_idx = index[n_train : n_train + n_val]
-    test_idx = index[n_train + n_val :]
-    return train_idx, val_idx, test_idx
-
-
 def split_entry_targets(x_entry, num_numerical, cat_dims, cat_order):
     num_target = x_entry[:, :num_numerical]
     cat_targets = {}
@@ -147,6 +136,41 @@ def split_entry_targets(x_entry, num_numerical, cat_dims, cat_order):
         cat_targets[field] = one_hot.argmax(dim=1)
         offset_index += n_cat
     return num_target, cat_targets
+
+
+# why: with all edges present, a train entry can see test features in two hops,
+# so the shared backbone leaks held-out features into the weights.
+# Filtering edges per phase closes that path.
+# All nodes stay in graph, so entry ids remain global and the audit code keeps working
+# data: train graph keeps 426327 of 533009 posts_to edges, train+val 479667
+def graph_with_entry_edges(graph, allowed_entries):
+    keep = torch.zeros(graph["entry"].num_nodes, dtype=torch.bool)
+    keep[allowed_entries] = True
+
+    filtered = HeteroData()
+    filtered["entry"].x = graph["entry"].x
+    filtered["entry"].y = graph["entry"].y
+    filtered["gl_account"].x = graph["gl_account"].x
+    filtered["gl_account"].y = graph["gl_account"].y
+    filtered["profit_center"].x = graph["profit_center"].x
+    filtered["profit_center"].y = graph["profit_center"].y
+
+    filtered.entry_feature_info = graph.entry_feature_info
+    filtered.num_gl_accounts = graph.num_gl_accounts
+    filtered.num_profit_centers = graph.num_profit_centers
+
+    for edge_type in graph.edge_types:
+        edge_index = graph[edge_type].edge_index
+        source_type = edge_type[0]
+
+        if source_type == "entry":
+            mask = keep[edge_index[0]]
+        else:
+            mask = keep[edge_index[1]]
+
+        filtered[edge_type].edge_index = edge_index[:, mask]
+
+    return filtered
 
 
 @torch.no_grad()
@@ -252,16 +276,20 @@ def feature_error_breakdown(model, subgraph, gamma):
 
     breakdown = {}
 
-    # numerical fields combined into one MSE term
     numerical_error = ((num_pred[0] - num_target[0]) ** 2).mean().item()
-    breakdown["numerical (amount)"] = numerical_error
+    weighted = {"numerical (amount)": (1 - gamma) * numerical_error}
 
-    # each categorical field separately
     for field in CAT_ORDER:
         field_error = F.cross_entropy(
             cat_logits[field][0:1], cat_targets[field][0:1]
         ).item()
-        breakdown[field] = field_error
+        weighted[field] = (gamma / len(CAT_ORDER)) * field_error
+
+    total = sum(weighted.values())
+    if total > 0:
+        breakdown = {field: value / total for field, value in weighted.items()}
+    else:
+        breakdown = weighted
 
     return breakdown
 
@@ -276,7 +304,10 @@ def build_audit_table(model, graph, df_best_test, gamma, top_n=20):
     for _, row in tqdm(top_entries.iterrows(), total=len(top_entries), desc="audit"):
         entry_id = int(row["entry_id"])
 
-        # load subgraph centred on this one entry
+        # data: input_nodes points at one flagged entry with batch_size=1,
+        # so the loader samples the 2-hop subgraph around it. PyG always puts
+        # the input node at position 0 of the batch, which is why the
+        # explainability functions below can simply read index [0]
         single_loader = NeighborLoader(
             data=graph,
             num_neighbors=[10] * 2,
@@ -308,14 +339,6 @@ def build_audit_table(model, graph, df_best_test, gamma, top_n=20):
         )
 
     return pd.DataFrame(audit_rows)
-
-
-def get_prec_recall(predict, target, top_k: int):
-    target = torch.as_tensor(target, dtype=torch.bool)
-    predict = torch.as_tensor(predict, dtype=torch.float32)
-    p = retrieval_precision(preds=predict, target=target, top_k=top_k)
-    r = retrieval_recall(preds=predict, target=target, top_k=top_k)
-    return p.item(), r.item()
 
 
 class Encoder(torch.nn.Module):
@@ -506,6 +529,8 @@ def evaluate(loader, centroid, epoch=None, split_str=None, alpha=None, gamma=Non
     sd_all = torch.cat(sd_all, dim=0)
     z_all = torch.cat(z_all, dim=0)
 
+    # RE and SD on different scales (cross-entropy vs squared distance),
+    # min-max puts both on [0,1] so alpha mixes fairly data
     re_normal = (re_all - re_all.min()) / (re_all.max() - re_all.min() + 1e-12)
     sd_normal = (sd_all - sd_all.min()) / (sd_all.max() - sd_all.min() + 1e-12)
 
@@ -517,8 +542,10 @@ def evaluate(loader, centroid, epoch=None, split_str=None, alpha=None, gamma=Non
     all_bin = (all_targets != 0).astype(int)
 
     if HAS_LABELS:
-        p100, r100 = get_prec_recall(predict=all_preds, target=all_bin, top_k=100)
-        roc = roc_auc_score(all_bin, all_preds)
+        shared_metrics = metrics_from_scores(all_preds, all_bin)
+        roc = shared_metrics["roc_auc"]
+        p100 = shared_metrics["p100"]
+        r100 = shared_metrics["r100"]
     else:
         roc, p100, r100 = None, None, None
 
@@ -546,6 +573,8 @@ def evaluate(loader, centroid, epoch=None, split_str=None, alpha=None, gamma=Non
     return metrics, df_epoch, z_all.numpy(), all_targets
 
 
+# why: gamma sits inside the training loss, so every value needs its own
+# retrained model (10 epochs each).
 def gamma_ablation(gamma_sweep, epochs=10):
     global model, optimizer, GAMMA
     gamma_iter = []
@@ -565,7 +594,7 @@ def gamma_ablation(gamma_sweep, epochs=10):
             train()
         centroid = calc_regular_centroid(neighbor_train)
         test_metrics, _, _, _ = evaluate(
-            loader=neighbor_test,
+            loader=neighbor_val,
             centroid=centroid,
             epoch=epochs,
             split_str="val",
@@ -575,15 +604,29 @@ def gamma_ablation(gamma_sweep, epochs=10):
         gamma_iter.append({"gamma": g, **test_metrics})
     df_gamma = pd.DataFrame(gamma_iter)
     df_gamma.to_csv(f"{OUTPUT_DIR}/ablation_gamma_{DATASET}.csv", index=False)
+
+    GAMMA = 0.65
+    model = Model(
+        embedding_dim=EMBEDDING_DIM,
+        hidden_dim=HIDDEN_DIM,
+        num_pc=NUM_PC,
+        num_gl=NUM_GL,
+        num_numerical=NUM_NUMERICAL,
+        cat_dims=CAT_DIMS,
+    )
+    model.load_state_dict(
+        torch.load(
+            f"{ROOT_DIR}/data/processed/best_model_{DATASET}.pt", weights_only=True
+        )
+    )
     return df_gamma
 
 
-def run_gnn(dataset, has_labels, seed=42, epochs=20):
+def run_gnn(dataset, has_labels, seed=42, epochs=20) -> tuple:
     global DATASET, HAS_LABELS, graph
     global NUM_GL, NUM_PC, NUM_NUMERICAL, CAT_DIMS, CAT_ORDER, OUTPUT_DIM
-    global regular_idx, local_idx, global_idx
     global model, optimizer
-    global neighbor_train, neighbor_val, neighbor_test
+    global neighbor_train, neighbor_val, neighbor_test, neighbor_common
     global EPOCHS
 
     DATASET = dataset
@@ -610,53 +653,76 @@ def run_gnn(dataset, has_labels, seed=42, epochs=20):
     CAT_DIMS = graph.entry_feature_info["categorical_dims"]
     CAT_ORDER = graph.entry_feature_info["categorical_order"]
 
-    regular_idx = (graph["entry"].y == 0).nonzero(as_tuple=True)[0]
-    local_idx = (graph["entry"].y == 1).nonzero(as_tuple=True)[0]
-    global_idx = (graph["entry"].y == 2).nonzero(as_tuple=True)[0]
-
-    gen = torch.Generator().manual_seed(seed)
-
+    # three phase protocol: fit on the train-only graph, select epoch and
+    # alpha/gamma on the train+val graph, score test once on the full graph.
+    #
+    # why: in a graph,a plain loss mask is not enough. With all edges present
+    # the features of held-out entries still reach the train entries through
+    # the shared gl/pc nodes during message passing, so the edges themselves
+    # have to be split per phase
     if HAS_LABELS:
-        regular_train, regular_val, regular_test = split(regular_idx, gen)
-        _, local_val, local_test = split(local_idx, gen)
-        _, global_val, global_test = split(global_idx, gen)
-
-        print(f"val anomaly split: {len(local_val)}(local)/{len(global_val)}(global)")
-        print(
-            f"test anomaly split: {len(local_test)}(local)/{len(global_test)}(global)"
+        train_ids, val_ids, test_ids = make_entry_split(graph["entry"].y, seed)
+        torch.save(
+            {"train": train_ids, "val": val_ids, "test": test_ids},
+            f"{ROOT_DIR}/data/processed/split_{DATASET}.pt",
         )
-
-        train_mask = regular_train
-        val_mask = torch.cat([regular_val, local_val, global_val])
-        test_mask = torch.cat([regular_test, local_test, global_test])
-
-        val_mask = val_mask[torch.randperm(len(val_mask), generator=gen)]
-        test_mask = test_mask[torch.randperm(len(test_mask), generator=gen)]
+        graph_train = graph_with_entry_edges(graph, train_ids)
+        train_and_val = torch.cat([train_ids, val_ids])
+        graph_trainval = graph_with_entry_edges(graph, train_and_val)
     else:
-        all_idx = torch.arange(graph["entry"].num_nodes)
-        all_idx = all_idx[torch.randperm(len(all_idx), generator=gen)]
-        n = len(all_idx)
+        # unlabelled deployment: no model selection happens, so training
+        # and scoring on everything leaks nothing
+        all_entries = torch.arange(graph["entry"].num_nodes)
+        train_ids = all_entries
+        val_ids = None
+        test_ids = all_entries
+        graph_train = graph
+        graph_trainval = graph
 
-        train_mask = all_idx[: int(0.8 * n)]
-        val_mask = all_idx[int(0.8 * n) : int(0.9 * n)]
-        test_mask = all_idx[int(0.9 * n) :]
-
-    loader_kwargs = dict(
-        data=graph,
+    neighbor_train = NeighborLoader(
+        data=graph_train,
+        input_nodes=("entry", train_ids),
+        shuffle=True,
         num_neighbors=[10] * 2,
         batch_size=128,
         subgraph_type="bidirectional",
     )
 
-    neighbor_train = NeighborLoader(
-        input_nodes=("entry", train_mask), shuffle=True, **loader_kwargs
-    )
-    neighbor_val = NeighborLoader(
-        input_nodes=("entry", val_mask), shuffle=False, **loader_kwargs
-    )
+    neighbor_val = None
+    if HAS_LABELS:
+        neighbor_val = NeighborLoader(
+            data=graph_trainval,
+            input_nodes=("entry", val_ids),
+            shuffle=False,
+            num_neighbors=[10] * 2,
+            batch_size=128,
+            subgraph_type="bidirectional",
+        )
+
+    # test pass runs on the FULL graph, all edges allowed at this point
     neighbor_test = NeighborLoader(
-        input_nodes=("entry", test_mask), shuffle=False, **loader_kwargs
+        data=graph,
+        input_nodes=("entry", test_ids),
+        shuffle=False,
+        num_neighbors=[10] * 2,
+        batch_size=128,
+        subgraph_type="bidirectional",
     )
+
+    neighbor_common = None
+    if HAS_LABELS:
+        common_ids = sample_common_test(
+            graph["entry"].y, test_ids, n_regular=10_000, seed=seed
+        )
+        # scored on the FULL graph: this is a test-time pass, edges allowed
+        neighbor_common = NeighborLoader(
+            data=graph,
+            input_nodes=("entry", common_ids),
+            shuffle=False,
+            num_neighbors=[10] * 2,
+            batch_size=128,
+            subgraph_type="bidirectional",
+        )
 
     model = Model(
         embedding_dim=EMBEDDING_DIM,
@@ -668,45 +734,43 @@ def run_gnn(dataset, has_labels, seed=42, epochs=20):
     )
     optimizer = Adam(model.parameters(), lr=0.0001)
 
-    best_val_auc = 0
-    best_epoch = 0
-    patience = 3
-    epoch_no_improve = 0
+    best_epoch = EPOCHS
+    best_val_roc = -1.0
     all_rows = []
 
+    # why: the score is alpha*RE + (1-alpha)*SD.
+    # Epoch selection runs with alpha=1.0, so the SD term gets weight zero and the
+    # centroid value does not influence anything.
+    # A placeholder of zeros fills the argument and skips a full pass over 426k train
+    # entries per epoch. The real centroid is computed once after training, for the
+    # alpha ablation where alpha < 1
+    # data: centroid shape (64,), the latent dim of the encoder
+    zero_centroid = torch.zeros(HIDDEN_DIM)
+
     for epoch in range(1, EPOCHS + 1):
-        print(f"Epoch: {epoch:02d}")
         loss, mse, ce = train()
-        centroid = calc_regular_centroid(neighbor_train)
-        val_metrics, df_val, _, _ = evaluate(
-            neighbor_val, centroid, epoch, "val", alpha=ALPHA, gamma=GAMMA
-        )
-        all_rows.append(df_val)
+        print(f"Epoch {epoch:02d} | Loss {loss:.4f} (MSE {mse:.4f}, CE {ce:.4f})")
 
         if HAS_LABELS:
-            print(
-                f"Epoch {epoch:02d} | Loss {loss:.4f} (MSE {mse:.4f}, CE {ce:.4f}) | "
-                f"Val ROC {val_metrics['roc_auc']:.4f} | P@100 {val_metrics['p100']:.4f}"
+            val_metrics, _, _, _ = evaluate(
+                neighbor_val, zero_centroid, epoch, "val", alpha=1.0, gamma=GAMMA
             )
-            if val_metrics["roc_auc"] > best_val_auc:
-                best_val_auc = val_metrics["roc_auc"]
+            print(f"         | val ROC {val_metrics['roc_auc']:.4f}")
+
+            # roc is never None here, this branch only runs when labels exist
+            val_roc = val_metrics["roc_auc"]
+            if val_roc is not None and val_roc > best_val_roc:
+                best_val_roc = val_roc
                 best_epoch = epoch
-                epoch_no_improve = 0
                 torch.save(
                     model.state_dict(),
                     f"{ROOT_DIR}/data/processed/best_model_{DATASET}.pt",
                 )
-            else:
-                epoch_no_improve += 1
-            if epoch_no_improve >= patience:
-                print(f"early stopped at epoch: {epoch}")
-                break
-        else:
-            print(f"Epoch {epoch:02d} | Loss {loss:.4f} (MSE {mse:.4f}, CE {ce:.4f})")
-            best_epoch = epoch
-            torch.save(
-                model.state_dict(), f"{ROOT_DIR}/data/processed/best_model_{DATASET}.pt"
-            )
+
+    if not HAS_LABELS:
+        torch.save(
+            model.state_dict(), f"{ROOT_DIR}/data/processed/best_model_{DATASET}.pt"
+        )
 
     model.load_state_dict(
         torch.load(
@@ -715,11 +779,13 @@ def run_gnn(dataset, has_labels, seed=42, epochs=20):
     )
     centroid = calc_regular_centroid(neighbor_train)
 
+    # alpha and gamma are selection choices, so both ablations run on validation.
+    # alpha only reweights existing scores (no retraining needed)
     if HAS_LABELS:
         alpha_iter = []
         for a in [0.0, 0.25, 0.5, 0.65, 0.75, 0.9, 1.0]:
             test_metrics_a, df_test_a, z_test_a, y_test_a = evaluate(
-                neighbor_test, centroid, best_epoch, "test", alpha=a, gamma=GAMMA
+                neighbor_val, centroid, best_epoch, "val", alpha=a, gamma=GAMMA
             )
             alpha_iter.append({"alpha": a, **test_metrics_a})
         df_alpha = pd.DataFrame(alpha_iter)
@@ -847,25 +913,22 @@ def run_gnn(dataset, has_labels, seed=42, epochs=20):
         save_path=f"{OUTPUT_DIR}/score_distribution_{DATASET}_no_top1.png",
         title=f"Anomaly score distribution (excl. top 1 entry) - {DATASET}",
     )
-    
+
     df_gnn_common = None
     if HAS_LABELS:
-        y_entry = graph["entry"].y
-        anom = (y_entry != 0).nonzero(as_tuple=True)[0]
-        reg = (y_entry == 0).nonzero(as_tuple=True)[0]
-        perm = torch.randperm(len(reg), generator=torch.Generator().manual_seed(seed))
-        common_ids = torch.cat([anom, reg[perm[:10_000]]])
-
-        common_loader = NeighborLoader(
-            input_nodes=("entry", common_ids), shuffle=False, **loader_kwargs
-        )
         _, df_gnn_common, _, _ = evaluate(
-            common_loader, centroid, best_epoch, "common", alpha=ALPHA, gamma=GAMMA
+            neighbor_common, centroid, best_epoch, "common", alpha=ALPHA, gamma=GAMMA
         )
-        df_gnn_common.to_csv(f"{OUTPUT_DIR}/gnn_common_10100_{DATASET}.csv", index=False)
+        df_gnn_common.to_csv(
+            f"{OUTPUT_DIR}/gnn_common_10050_{DATASET}.csv", index=False
+        )
 
     return df_best_test, test_metrics, df_gnn_common
 
 
 if __name__ == "__main__":
     run_gnn(dataset="schreyer", has_labels=True, seed=42, epochs=20)
+
+
+# https://github.com/pyg-team/pytorch_geometric/blob/master/examples/hetero/bipartite_sage_unsup.py#L173
+# https://www.kaggle.com/code/rayanaay/graph-neural-network-graphsage-sample-agregate

@@ -1,14 +1,21 @@
+# preprocessing.py - raw csv to scaled features for graph + baselines
+# in:data/raw/fraud_dataset_v2.csv (533009, 10)
+# out: processed csv with feature columns, and two feature frames
+# (scaled and unscaled) (533009, 616+2)
+# ---------------------------------------------------------------
+
 import pandas as pd
 import numpy as np
 import os
-from sklearn.preprocessing import LabelEncoder, StandardScaler
 from pathlib import Path
+import torch
+from src.data.split import make_entry_split
 
 ROOT_DIR = Path(os.getcwd())
 OUTPUT_DIR = ROOT_DIR / "outputs"
 
-def preprocessing():
 
+def preprocessing():
     df = pd.read_csv(f"{ROOT_DIR}/data/raw/fraud_dataset_v2.csv")
 
     # <class 'pandas.DataFrame'>
@@ -43,24 +50,32 @@ def preprocessing():
         }
     )
 
-    #### SPECIFIC FOR GRAPH ONLY ###########
+    ########################## GRAPH FEATURES ######################
+    # only the two scaled amounts, the one-hot happens in graph_construction.py
     df = df.sort_values("entry_id").reset_index(drop=True)
     os.makedirs(f"{ROOT_DIR}/data/processed", exist_ok=True)
 
     df_graph = df.copy()
 
-    amount_local_log = np.log(df_graph["amount_local"] + 1e-4)
-    amount_doc_log = np.log(df_graph["amount_doc"] + 1e-4)
+    amount_local_log = (df_graph["amount_local"] + 1e-4).apply(np.log)
+    amount_doc_log = (df_graph["amount_doc"] + 1e-4).apply(np.log)
 
-    train_mask = df_graph["label"] == "regular"
-    local_min, local_max = (
-        amount_local_log[train_mask].min(),
-        amount_local_log[train_mask].max(),
+    # why: min-max statistics come from the 426327 train rows only, so the scaler
+    # never sees held-out amount values. The split is a function of (labels, seed=42),
+    # so these rows are byte-identical to the ones the models train on later
+    #
+    # data: regular amount_local median ~4.9e5, global anomalies all ~9.2e7,
+    # so scaled test values can fall slightly outside [0,1] and that is oke
+    label_int = torch.tensor(
+        df_graph["label"].map({"regular": 0, "local": 1, "global": 2}).values
     )
-    doc_min, doc_max = (
-        amount_doc_log[train_mask].min(),
-        amount_doc_log[train_mask].max(),
-    )
+    train_ids, _, _ = make_entry_split(label_int, seed=42)
+    train_rows = train_ids.numpy()
+
+    local_min = amount_local_log.iloc[train_rows].min()
+    local_max = amount_local_log.iloc[train_rows].max()
+    doc_min = amount_doc_log.iloc[train_rows].min()
+    doc_max = amount_doc_log.iloc[train_rows].max()
 
     df_graph["feature_amount_local"] = (amount_local_log - local_min) / (
         local_max - local_min
@@ -70,9 +85,12 @@ def preprocessing():
     df_graph.to_csv(
         f"{ROOT_DIR}/data/processed/fraud_dataset_processed.csv", index=False
     )
-    ########################################
+    #######################################################################
 
-    # categorical data, one-hot encoding
+    ########################## BASELINE FEATURES ##########################
+    # for baseline models, the gl_account and profit_center become one-hot
+    # columns instead of neighbour nodes. This means, same information as the gnn, 
+    # flattened categorical data, one-hot encoding
     CATEGORICAL_COLUMNS = [
         "account_key",
         "profit_center",
@@ -87,47 +105,49 @@ def preprocessing():
         "amount_doc",
     ]
 
-    df_train = df[df["label"] == "regular"].copy()
-    df_eval = df.copy()
+    df_all = df.copy()
 
-    num_train = df_train[NUMERICAL_COLUMNS].copy()
-    num_eval = df_eval[NUMERICAL_COLUMNS].copy()
+    # numeric scaling on train statistics only, one hot vocabulary stays global
+    num_all = df_all[NUMERICAL_COLUMNS].copy()
+    num_all = (num_all + 1e-4).apply(np.log)
+    num_train_min = num_all.iloc[train_rows].min()
+    num_train_max = num_all.iloc[train_rows].max()
+    # scale on entire set but with min-max of the train set
+    num_all_scaled = (num_all - num_train_min) / (num_train_max - num_train_min) 
 
-    num_train = (num_train + 1e-4).apply(np.log)
-    num_eval = (num_eval + 1e-4).apply(np.log)
+    # why: the one-hot vocabulary is built on the full dataset.
+    # It only defines the feature space (which columns exist), it contains no
+    # statistics, so this leaks nothing
+    #
+    # data: 616 one-hot columns: 
+    # posting_key 73 
+    # + account_key 79 
+    # + company_code 158 
+    # + currency 76 
+    # + gl_account 73 
+    # + profit_center 157
+    #
+    # gl_account and profit_center are one-hot here because the baselines have no graph
+    # The gnn gets them as neighbours instead (388 dims there)
+    ohe_all = pd.get_dummies(df_all[CATEGORICAL_COLUMNS], dtype=np.float32)
 
-    num_train_scaled = (num_train - num_train.min()) / (
-        num_train.max() - num_train.min()
-    )
-    num_eval_scaled = (num_eval - num_train.min()) / (num_train.max() - num_train.min())
+    print(f"Categorical feature count: {ohe_all.shape[1]}")
+    print(f"Numerical feature count: {num_all.shape[1]}")
+    
+    features_all = pd.concat([ohe_all, num_all_scaled], axis=1)
+    features_all_unscaled = pd.concat([ohe_all, num_all], axis=1)
 
-    ohe_train = pd.get_dummies(df_train[CATEGORICAL_COLUMNS], dtype=np.float32)
-    ohe_eval = pd.get_dummies(df_eval[CATEGORICAL_COLUMNS], dtype=np.float32)
-    ohe_eval = ohe_eval.reindex(columns=ohe_train.columns, fill_value=0)
+    features_all["entry_id"] = df_all["entry_id"].values
+    features_all["label"] = df_all["label"].values
 
-    features_train = pd.concat([ohe_train, num_train_scaled], axis=1)
-    features_eval = pd.concat([ohe_eval, num_eval_scaled], axis=1)
+    features_all_unscaled["entry_id"] = df_all["entry_id"].values
+    features_all_unscaled["label"] = df_all["label"].values
 
-    features_train_unscaled = pd.concat([ohe_train, num_train], axis=1)
-    features_eval_unscaled = pd.concat([ohe_eval, num_eval], axis=1)
-
-    features_train["entry_id"] = df_train["entry_id"].values
-    features_train["label"] = df_train["label"].values
-
-    features_eval["entry_id"] = df_eval["entry_id"].values
-    features_eval["label"] = df_eval["label"].values
-
-    features_train_unscaled["entry_id"] = df_train["entry_id"].values
-    features_train_unscaled["label"] = df_train["label"].values
-
-    features_eval_unscaled["entry_id"] = df_eval["entry_id"].values
-    features_eval_unscaled["label"] = df_eval["label"].values
-
+    #######################################################################
+    
     return (
-        features_train,
-        features_eval,
-        features_train_unscaled,
-        features_eval_unscaled,
+        features_all,
+        features_all_unscaled,
     )
 
 
