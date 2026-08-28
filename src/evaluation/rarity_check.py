@@ -40,6 +40,7 @@ def rarity_check():
                     "top_feature": feature_name,
                     "value": entry_value,
                     "value_count": value_frequency,
+                    "ground_truth_hit": value_frequency == 1,
                 }
             )
 
