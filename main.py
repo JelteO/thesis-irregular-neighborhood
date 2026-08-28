@@ -22,6 +22,11 @@ from pathlib import Path
 from src.evaluation.comparison import compare_on_common
 from src.data.split import make_entry_split, sample_common_test
 from src.evaluation.fidelity import fidelity
+from src.evaluation.label_dist import (
+    label_distribution,
+    plot_labelled_score_distribution,
+)
+from src.evaluation.rarity_check import rarity_check
 
 ROOT_DIR = Path.cwd()
 OUTPUT_DIR = ROOT_DIR / "outputs"
@@ -34,6 +39,12 @@ EPOCHS = 10
 
 
 def run_schreyer():
+    """
+    Run the primary dataset end to end.
+    Preprocessing and graph construction are skipped when their output already
+    exists, since both take a few minutes and never change between runs.
+    """
+
     # only preprocess if we haven't already
     if not os.path.exists("data/processed/fraud_dataset_processed.csv"):
         print("preprocessing schreyer data...")
@@ -52,6 +63,11 @@ def run_schreyer():
 
 
 def run_philadelphia():
+    """
+    Run the secondary dataset.
+    Same pipeline, but without labels,
+    so no split and no evaluation against ground truth.
+    """
     if not os.path.exists("data/processed/city_payments_processed.csv"):
         print("preprocessing philadelphia data...")
         preprocessing_phil()
@@ -68,7 +84,12 @@ def run_philadelphia():
 
 
 def run_baselines():
-    # Run 4 baselines. These only apply ot the labelled dataset
+    """
+    Run all four baselines on the primary dataset.
+
+    Each one is wrapped in a try/except so a single failure does not take down
+    the rest of the run
+    """
     scores_by_model = {}
 
     for name, experiment in [
@@ -107,4 +128,7 @@ if __name__ == "__main__":
     print(table.to_string())
     table.to_csv(f"{OUTPUT_DIR}/comparison_common_10050.csv")
     fidelity()
+    rarity_check()
+    label_distribution(dfs)
+    plot_labelled_score_distribution()
     print("\nMain.py done")

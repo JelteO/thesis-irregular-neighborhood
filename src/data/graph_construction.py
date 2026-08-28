@@ -1,3 +1,8 @@
+# graph_construction.py - tabular journal entries to graph representations
+# in: data/processed/fraud_dataset_processed.csvd
+# out: one heterogeneous graph (for GNN),
+#   and two homogeneous graphs (fit and eval) for DOMINANT baseline
+
 import pandas as pd
 import numpy as np
 import os
@@ -12,6 +17,15 @@ OUTPUT_DIR = ROOT_DIR / "outputs"
 
 
 def create_graphs():
+    """
+    Build heterogeous graph, used by GNN and two homogeneous graphs used by DOMINANT
+
+    HETEROGENOUS GRAPH:
+    Has three nodes: entry (main node), gl_account and profit_center.
+    Entries carry their own features, the other two only carry an index that encoder
+    turns into a learned embedding.
+    """
+
     df = pd.read_csv(f"{ROOT_DIR}/data/processed/fraud_dataset_processed.csv")
 
     # four entry fields that become one-hot node features (386 columns)
@@ -115,10 +129,20 @@ def create_graphs():
     # homo graphs for DOMINANT, same three phase protocol as the gnn fit graph:
     # only train entry edges
     def build_homo(keep_entries):
+        """
+        Flatten the same data into one homogeneous graph for DOMINANT.
+
+        Entries and backbone nodes share one index space: entries first, then
+        the 73 accounts, then the 157 profit centers. Only the entries are a
+        subset, the backbone is always complete.
+        """
+
         numb_entries = len(keep_entries)
         gl_offset = numb_entries
         pc_offset = numb_entries + numb_gl
 
+        # gl_idx and pc_idx are indexed by the original row id.
+        # keep_entries looks up which account and center each entry belong to
         new_idx = torch.arange(numb_entries)
         gl_src = gl_idx[keep_entries]
         pc_src = pc_idx[keep_entries]
@@ -186,10 +210,3 @@ def create_graphs():
     print(f"homo_eval: {homo_eval.num_nodes} nodes")
 
     return True
-
-
-# https://pytorch.org/blog/how-computational-graphs-are-executed-in-pytorch/
-# https://medium.com/we-talk-data/pytorch-geometric-tutorial-94af3ae2b8cb
-# https://docs.pytorch.org/docs/stable/generated/torch.stack.html
-# https://pytorch-geometric.readthedocs.io/en/2.5.3/_modules/torch_geometric/data/data.html
-# HeteroData https://pytorch-geometric.readthedocs.io/en/2.6.0/notes/heterogeneous.html

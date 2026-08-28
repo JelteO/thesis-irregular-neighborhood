@@ -126,6 +126,13 @@ def plot_latent_space(latent_vectors, labels, save_path, scores=None, title="plo
 
 
 def split_entry_targets(x_entry, num_numerical, cat_dims, cat_order):
+    """
+    Cut the entry feature vector back in the fields it was build
+
+    The categorical targets are recovered by slicing per one-hot block and taking the argmax
+    This because decoder predicts each field seperately
+    """
+
     num_target = x_entry[:, :num_numerical]
     cat_targets = {}
 
@@ -144,6 +151,10 @@ def split_entry_targets(x_entry, num_numerical, cat_dims, cat_order):
 # All nodes stay in graph, so entry ids remain global and the audit code keeps working
 # data: train graph keeps 426327 of 533009 posts_to edges, train+val 479667
 def graph_with_entry_edges(graph, allowed_entries):
+    """
+    Return copy of the graph with all nodes but only the edges of the given entries
+    Nodes stay in place so entry ids remain global and the audit code keeps working
+    """
     keep = torch.zeros(graph["entry"].num_nodes, dtype=torch.bool)
     keep[allowed_entries] = True
 
@@ -175,6 +186,12 @@ def graph_with_entry_edges(graph, allowed_entries):
 
 @torch.no_grad()
 def compute_entry_re_score(model, x_dict, edge_index_dict, gamma):
+    """
+    Reconstruction error of a single entry, equation 1 in the thesis
+    Works on the raw error, not the normalized score: min-max is defined over
+    a whole scored set and means nothing for one occluded entry.
+    """
+
     model.eval()
 
     # structural nodes are embedding indices
@@ -208,6 +225,16 @@ def compute_entry_re_score(model, x_dict, edge_index_dict, gamma):
 
 @torch.no_grad()
 def occlusion_explain(model, subgraph, gamma):
+    """Relational attribution, the fidelity+ of equation 4
+
+    Removes the edges to one neighbor type and scores the entry again.
+    A positief drop means that context was pushing the score up,
+    a negative drop means it was making the entry look normal.
+
+    Per neighbor type, not per neighbor: one account holds hundreds of
+    thousands of entries, so a single removal would drown in noise.
+    """
+
     model.eval()
 
     baseline_score = compute_entry_re_score(
@@ -261,6 +288,12 @@ def occlusion_explain(model, subgraph, gamma):
 
 @torch.no_grad()
 def feature_error_breakdown(model, subgraph, gamma):
+    """Feature attribution, the weighted error share of equation 5.
+
+    Raw field errors are not comparable, a cross-entropy of 2.0 means something
+    else than a squared error of 2.0. Each field first gets the weight it
+    carries in the training loss before the shares are computed.
+    """
     model.eval()
 
     x_dict = dict(subgraph.x_dict)
@@ -296,6 +329,15 @@ def feature_error_breakdown(model, subgraph, gamma):
 
 @torch.no_grad()
 def build_audit_table(model, graph, df_best_test, gamma, top_n=20):
+    """One audit row per flagged entry:
+    both occlusion drops plus the field carries most of the error
+
+    The column names 'vendor_drop_pct' and 'department_drop_pct' are generic and
+    refer to the first and second backbone type.
+
+    Only the top 20 are explained, which mirrors how an auditor works through
+    a ranking from the top.
+    """
     model.eval()
 
     top_entries = df_best_test.head(top_n)
@@ -342,6 +384,13 @@ def build_audit_table(model, graph, df_best_test, gamma, top_n=20):
 
 
 class Encoder(torch.nn.Module):
+    """Two HeteroConv layers with a separate SAGEConv per relation type
+
+    Depth two on purpose: the first layer brings in the entries own account and profit center,
+    the second reaches the entries connected on them.
+    A third would describe the dataset instead of the entry.
+    """
+
     def __init__(self, hidden_dim, embedding_dim, num_pc, num_gl):
         super().__init__()
         self.emb_pc = Embedding(num_embeddings=num_pc, embedding_dim=embedding_dim)
@@ -383,6 +432,10 @@ class Encoder(torch.nn.Module):
 
 
 class Decoder(torch.nn.Module):
+    """Five parallel heads: one for both amounts (numerical fields), one per categorical field.
+    Seperate heads are what makes the feature attribution possible later on
+    """
+
     def __init__(self, hidden_dim, num_numerical, cat_dims):
         super().__init__()
         self.num_lin = Linear(hidden_dim, num_numerical)
@@ -475,6 +528,10 @@ def calc_regular_centroid(loader):
 
 @torch.no_grad()
 def evaluate(loader, centroid, epoch=None, split_str=None, alpha=None, gamma=None):
+    """
+    Score every entry in the loader, and compute ranking metrics when labels are available.
+    Used both during training for epoch selection and once on the test split.
+    """
     model.eval()
 
     if alpha is None:
@@ -576,6 +633,7 @@ def evaluate(loader, centroid, epoch=None, split_str=None, alpha=None, gamma=Non
 # why: gamma sits inside the training loss, so every value needs its own
 # retrained model (10 epochs each).
 def gamma_ablation(gamma_sweep, epochs=10):
+    """Retrain once per gamma value and report validation performance"""
     global model, optimizer, GAMMA
     gamma_iter = []
     for g in gamma_sweep:
@@ -623,6 +681,16 @@ def gamma_ablation(gamma_sweep, epochs=10):
 
 
 def run_gnn(dataset, has_labels, seed=42, epochs=20) -> tuple:
+    """
+    Run the full GNN pipeline for one dataset
+
+    Fits on train edges, picks the best epoch on validation ROC-AUC,
+    then scores the test split once. Philadelphia has no labels and is scored
+    transductively.
+
+    Returns (ranked test dataframe, test metrics, common subset scores).
+    The last is None when no labels
+    """
     global DATASET, HAS_LABELS, graph
     global NUM_GL, NUM_PC, NUM_NUMERICAL, CAT_DIMS, CAT_ORDER, OUTPUT_DIM
     global model, optimizer

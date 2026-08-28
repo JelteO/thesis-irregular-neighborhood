@@ -1,3 +1,10 @@
+# preprocessing_phil.py - raw city payments csv to a clean feature table
+# in: data/raw/city_payments_fy2017.csv (238894, 16)
+# out: data/processed/city_payments_processed.csv, 8 columns
+# ---------------------------------------------------------------
+# The secondary dataset needs more cleaning than the primary one:
+# it has missing values, duplicate code columns and a date that has to be split
+
 import pandas as pd
 import numpy as np
 import os
@@ -41,6 +48,10 @@ def preprocessing_phil():
     df["day"] = df["check_date"].dt.day
 
     amount = df["transaction_amount"]
+
+    # payments can be negative (such as corrections and refunds)
+    # Therefore log1p (func) is applied to the absolute value and the
+    # sign (func) is put back afterwards. A plain log would drop those rows
     amount_log = np.sign(amount) * np.log1p(np.abs(amount))
     df["amount_log"] = (amount_log - amount_log.min()) / (
         amount_log.max() - amount_log.min()
@@ -76,12 +87,3 @@ def preprocessing_phil():
     os.makedirs(f"{ROOT_DIR}/data/processed", exist_ok=True)
     df.to_csv(f"{ROOT_DIR}/data/processed/city_payments_processed.csv", index=False)
     return df
-
-
-""" links I have used:
-https://scikit-learn.org/1.5/modules/decomposition.html#incrementalpca
-https://sklearn.org/1.8/auto_examples/decomposition/plot_incremental_pca.html
-https://visualstudiomagazine.com/articles/2021/10/20/anomaly-detection-pca.aspx
-https://ieeexplore.ieee.org/document/6200273
-https://scikit-learn.org/stable/modules/generated/sklearn.metrics.roc_auc_score.html#sklearn.metrics.roc_auc_score
-"""

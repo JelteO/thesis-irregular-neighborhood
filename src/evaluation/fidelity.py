@@ -10,6 +10,8 @@ def fidelity():
         for dataset in ["schreyer", "philadelphia"]:
             audit = pd.read_csv(f"outputs/audit_table_{dataset}.csv").head(20)
             rows = []
+            # the audit tables use generic backbone column names,
+            # so on the primary dataset these hold gl_account and profit_center
             for col, name in [
                 ("vendor_drop_pct", "gl_account / vendor"),
                 ("department_drop_pct", "profit_center / department"),
@@ -26,6 +28,7 @@ def fidelity():
             table = pd.DataFrame(rows)
             table.to_csv(f"outputs/fidelity_{dataset}.csv", index=False)
     except Exception as e:
+        # a missing audit table should not stop the rest of main.py
         print(f"fidelity failed: {e}")
         return False
     return True

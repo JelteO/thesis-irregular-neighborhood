@@ -1,3 +1,12 @@
+# graph_construction_phil.py - city payments to a heterogeneous graph
+# in: data/processed/city_payments_processed.csv
+# out: data/processed/graph_hetero_phil.pt
+# ---------------------------------------------------------------
+# The node types keep the Schreyer names.
+# - A vendor plays the role of a gl_account here and
+# - a department that of a profit_center,
+# This so gnn_model.py runs on both datasets without a single change.
+
 import pandas as pd
 import numpy as np
 import os
@@ -10,6 +19,13 @@ OUTPUT_DIR = ROOT_DIR / "outputs"
 
 
 def create_graphs_phil():
+    """
+    Build the same graph structure as the primary dataset,
+    with vendor and department taking the place of 'account' and 'profit center'.
+
+    Philadelphia has no anomaly labels, so a zero label is stored as a
+    placeholder. Nothing in the pipeline selects or evaluates on it.
+    """
     df = pd.read_csv(f"{ROOT_DIR}/data/processed/city_payments_processed.csv")
 
     # entry fields that become one-hot node features

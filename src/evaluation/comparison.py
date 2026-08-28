@@ -8,6 +8,14 @@ from torchmetrics.functional.retrieval import retrieval_precision, retrieval_rec
 
 
 def metrics_from_scores(scores, labels_bin, k=100):
+    """
+    Compute ROC-AUC, average precision and precision/recall at k
+
+    NOTE:
+    values are p100 and r100 for historical reasons, but k
+    is set to the number of anomalies present (50 on the test split). With a
+    fixed k of 100 even a perfect model could only reach 0.5
+    """
     scores = np.asarray(scores, dtype=np.float32)
     labels_bin = np.asarray(labels_bin).astype(int)
 

@@ -1,3 +1,13 @@
+# experiment.py - runs each baseline on the same split and the same entries
+# in: processed csv and the two homogeneous graphs
+# out: per model an scoring dataframe over the common test subset & metrics
+# ---------------------------------------------------------------
+# Every experiment function follows the same shape:
+# - load the data,
+# - apply the split from split.py,
+# - fit on train,
+# - score the common 10050 entries
+
 import pandas as pd
 import numpy as np
 from src.models.baselines import PCABaseline, IsolationForestBaseline
@@ -58,6 +68,7 @@ def scores_to_df(common_ids, label_int, scores, model_name):
 
 
 def experiment_pca():
+    """Fit PCA on the train regulars and score the common test subset"""
     df_eval, _ = load_data()
     label_int, train_ids, _, common_ids = get_split_and_common(df_eval["label"])
 
@@ -77,6 +88,10 @@ def experiment_pca():
 
 
 def experiment_if():
+    """Fit Isolation Forest on the train regulars and score the common test subset.
+    Runs on the unscaled features,
+    since the method splits on raw values rather than on distances
+    """
     _, df_eval_unscaled = load_data()
     label_int, train_ids, _, common_ids = get_split_and_common(
         df_eval_unscaled["label"]
@@ -100,6 +115,10 @@ def experiment_if():
 
 
 def experiment_schreyer(epochs=50, device="cpu"):
+    """Fit the Schreyer adversarial autoencoder and score twice:
+    the full test split for the ranking csv,
+    and the common subset for the comparison table
+    """
     df_eval, _ = load_data()
     label_int, train_ids, test_ids, common_ids = get_split_and_common(df_eval["label"])
 
@@ -148,6 +167,12 @@ def experiment_schreyer(epochs=50, device="cpu"):
 
 
 def experiment_dominant():
+    """Fit DOMINANT on the fit graph and score the eval graph
+
+    DOMINANT builds a dense adjacency and cannot handle the full test set, which
+    is why it runs on the 10050 common entries and why that subset exists in the
+    first place for all baseline comparisons.
+    """
     graph_fit = torch.load("data/processed/graph_homo_fit.pt", weights_only=False)
     graph_eval = torch.load("data/processed/graph_homo_eval.pt", weights_only=False)
 
@@ -157,6 +182,12 @@ def experiment_dominant():
 
     scores_all = model.decision_function(graph_eval)
     scores_all = np.asarray(scores_all)
+
+    # The eval graph stacks the entries in a fixed order:
+    # - first the 10000 fit entries,
+    # - then the 10050 common test entries,
+    # - then the backbone nodes
+    # So the test scores sit in the slice between n_fit and n_entries.
 
     # common test entries sit after the fit entries in the eval graph
     n_fit = graph_eval.n_fit  # 10000, where the test entries start
@@ -185,6 +216,13 @@ def experiment_dominant():
 
 
 def dominant_explanations(model, graph_eval, scores_eval, common_ids, top_n=20):
+    """
+    Extract a feature-level explanation from DOMINANT
+
+    DOMINANT reconstructs the whole feature vector at once, so the blamed field
+    is discovered by sum the squared error per one-hot block.
+    """
+
     df_raw = pd.read_csv("data/processed/fraud_dataset_processed.csv")
 
     # field to column slicing (numeric cols first)

@@ -1,3 +1,14 @@
+# schreyer_ae.py - adversarial autoencoder baseline
+# in: feature matrix (n_entries, 618), fitted on train rows only
+# out: one anomaly score per entry
+# ---------------------------------------------------------------
+#
+# Refactor of the implementation published with the original paper.
+# The architecture and the learning rates are unchanged
+# (encoder and decoder 1e-3, discriminator and generator 1e-5),
+# so this is a fair reproduction and not a reinterpretation.
+# Only surrounding code was rewritten to fit the fit/score interface the other baselines use
+
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
@@ -239,6 +250,15 @@ class SchreyerAEBaseline:
         lr: float = 1e-3,
         lr_disc: float = 1e-5,
     ):
+        """
+        Train the autoencoder and the discriminator alternately
+
+        Next to the reconstruction loss, the discriminator pushes the latent
+        space towards a chosen Gaussian prior.
+
+        That is what makes a distance to the prior a meaningful anomaly signal in this model,
+        and it is exactly the constraint the GNN of this thesis does not have
+        """
         reconstruction_criterion_categorical = nn.BCELoss(reduction="mean").to(
             self.device
         )
@@ -382,6 +402,9 @@ class SchreyerAEBaseline:
         return self
 
     def score(self, x_eval: np.ndarray) -> np.ndarray:
+        """Anomaly score, the reconstruction error combined with the distance to
+        the prior, weighted by alpha = 0.8 as in the original paper
+        """
         assert self._is_fitted, "Call fit() before score()"
 
         # define the optimization criterion / loss function (eval mode, reduction='none')

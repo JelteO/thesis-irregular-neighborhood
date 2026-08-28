@@ -89,7 +89,7 @@ def preprocessing():
 
     ########################## BASELINE FEATURES ##########################
     # for baseline models, the gl_account and profit_center become one-hot
-    # columns instead of neighbour nodes. This means, same information as the gnn, 
+    # columns instead of neighbour nodes. This means, same information as the gnn,
     # flattened categorical data, one-hot encoding
     CATEGORICAL_COLUMNS = [
         "account_key",
@@ -113,18 +113,18 @@ def preprocessing():
     num_train_min = num_all.iloc[train_rows].min()
     num_train_max = num_all.iloc[train_rows].max()
     # scale on entire set but with min-max of the train set
-    num_all_scaled = (num_all - num_train_min) / (num_train_max - num_train_min) 
+    num_all_scaled = (num_all - num_train_min) / (num_train_max - num_train_min)
 
     # why: the one-hot vocabulary is built on the full dataset.
     # It only defines the feature space (which columns exist), it contains no
     # statistics, so this leaks nothing
     #
-    # data: 616 one-hot columns: 
-    # posting_key 73 
-    # + account_key 79 
-    # + company_code 158 
-    # + currency 76 
-    # + gl_account 73 
+    # data: 616 one-hot columns:
+    # posting_key 73
+    # + account_key 79
+    # + company_code 158
+    # + currency 76
+    # + gl_account 73
     # + profit_center 157
     #
     # gl_account and profit_center are one-hot here because the baselines have no graph
@@ -133,7 +133,7 @@ def preprocessing():
 
     print(f"Categorical feature count: {ohe_all.shape[1]}")
     print(f"Numerical feature count: {num_all.shape[1]}")
-    
+
     features_all = pd.concat([ohe_all, num_all_scaled], axis=1)
     features_all_unscaled = pd.concat([ohe_all, num_all], axis=1)
 
@@ -144,7 +144,7 @@ def preprocessing():
     features_all_unscaled["label"] = df_all["label"].values
 
     #######################################################################
-    
+
     return (
         features_all,
         features_all_unscaled,
